@@ -1,6 +1,7 @@
-"""This module contains methods and classes for making parallel ETL flows.
-Note that this module in many cases will give better results with Jython
-(where it uses threads) than with CPython (where it uses processes).
+"""Parallel ETL flows using CPython 3.14 subinterpreters where possible.
+
+Legacy fork workers remain for live state that cannot be transferred between
+interpreters, and for Python versions without concurrent.interpreters.
 """
 
 # Copyright (c) 2011-2020, Aalborg University (pygrametl@cs.aau.dk)
@@ -29,6 +30,9 @@ Note that this module in many cases will give better results with Jython
 
 import copy
 import os
+import pickle
+import threading
+import traceback
 from sys import version_info
 import sys
 
@@ -36,26 +40,113 @@ import pygrametl
 
 
 try:
-    from Queue import Empty  # Python 2
+    from Queue import Empty, Full  # Python 2
 except ImportError:
-    from queue import Empty  # Python 3
+    from queue import Empty, Full  # Python 3
 
 if sys.platform.startswith("java"):
     # Jython specific code in jythonmultiprocessing
     import pygrametl.jythonmultiprocessing as multiprocessing
 else:
-    # Use (C)Python's std. lib.
     import multiprocessing
 
-    # This module assumes processes inherit state through fork. Thus, it
-    # requires that the platform supports the fork start method. The start
-    # method is not set to fork when Sphinx is building the documentation as it
-    # prevents Windows from doing so
-    if (
-        multiprocessing.get_start_method(allow_none=True) != "fork"
-        and os.environ.get("SPHINX_BUILD") != "1"
-    ):
-        multiprocessing.set_start_method("fork")
+try:
+    from concurrent import interpreters
+except ImportError:  # Python < 3.14 and Jython
+    interpreters = None
+
+
+def _process_context():
+    """Fork is needed only for the legacy live-object compatibility path."""
+    if sys.platform.startswith("java"):
+        return multiprocessing
+    return multiprocessing.get_context("fork")
+
+
+def _portable(value):
+    """Can a callable/object be reconstructed in an isolated interpreter?"""
+    if interpreters is None:
+        return False
+    if getattr(value, "__module__", None) == "__main__":
+        return False
+    try:
+        pickle.dumps(value)
+    except (TypeError, AttributeError, pickle.PicklingError):
+        return False
+    return True
+
+
+def _start_worker(interp, func, *args):
+    # Daemon only guards against an abandoned flow after a worker failure.
+    # Normal close/shutdown joins the thread and closes its interpreter.
+    thread = threading.Thread(target=interp.call, args=(func, *args), daemon=True)
+    thread.start()
+    return thread
+
+
+def _check_worker(error_queue, thread):
+    try:
+        message = error_queue.get_nowait()
+    except Empty:
+        if not thread.is_alive():
+            raise RuntimeError("Subinterpreter worker exited unexpectedly")
+    else:
+        raise RuntimeError("Subinterpreter worker failed:\n" + message)
+
+
+def _wait_ack(ack, error_queue, thread):
+    while True:
+        try:
+            ack.get(timeout=0.1)
+            try:
+                message = error_queue.get_nowait()
+            except Empty:
+                pass
+            else:
+                raise RuntimeError("Subinterpreter worker failed:\n" + message)
+            return
+        except Empty:
+            _check_worker(error_queue, thread)
+
+
+def _interpreter_split_worker(func, input_queue, result_queue, ack, errors, splitid):
+    global splitno
+    splitno = splitid
+    try:
+        while True:
+            args, kw = input_queue.get()
+            if args is None:
+                return
+            result = func(*args, **kw)
+            if result_queue is not None:
+                result_queue.put(result)
+            else:
+                ack.put(None)
+    except BaseException:
+        errors.put(traceback.format_exc())
+
+
+def _interpreter_flow_worker(funcs, input_queue, output_queue, ack, errors):
+    try:
+        while True:
+            batch = input_queue.get()
+            if batch is None:
+                output_queue.put(None)
+                return
+            for args in batch:
+                for func in funcs:
+                    func(*args)
+            output_queue.put(batch)
+            ack.put(None)
+    except BaseException:
+        errors.put(traceback.format_exc())
+
+
+def _interpreter_decoupled_worker(decoupled):
+    try:
+        decoupled._Decoupled__decoupledworker()
+    except BaseException:
+        decoupled._Decoupled__errors.put(traceback.format_exc())
 
 __all__ = [
     "splitpoint",
@@ -110,7 +201,7 @@ def _getexitfunction():
     # set up the terminator
     global _toterminator
     if _toterminator is None:
-        _toterminator = multiprocessing.Queue()
+        _toterminator = _process_context().Queue()
 
         def terminatorfunction():
             pids = set([_masterpid])
@@ -125,7 +216,7 @@ def _getexitfunction():
                         os.kill(p, 9)
                     return
 
-        terminatorprocess = multiprocessing.Process(target=terminatorfunction)
+        terminatorprocess = _process_context().Process(target=terminatorfunction)
         terminatorprocess.daemon = True
         terminatorprocess.start()
 
@@ -178,10 +269,15 @@ def _splitprocess(func, input, output, splitid):
 
 
 _splitpointqueues = []
+_interpreter_splits = []
 
 
 def splitpoint(*arg, **kwargs):
-    """To be used as an annotation to make a function run in a separate process.
+    """Run calls to a function in isolated workers.
+
+    Importable, picklable functions use subinterpreters on CPython 3.14+.
+    Decorated functions whose original callable is no longer importable,
+    closures, and live state use a forked process for compatibility.
 
     Each call of a @splitpoint annotated function f involves adding the
     request (and arguments, if any) to a shared queue. This can be
@@ -195,9 +291,9 @@ def splitpoint(*arg, **kwargs):
     | @splitpoint
     | def f(args):
 
-        `The simplest case. Makes f run in a separate process.
+        `The simplest case. Makes f run in a separate worker.
         All calls of f will return None immediately and f will be
-        invoked in the separate process.`
+        invoked in the separate worker.`
 
     | @splitpoint()
     | def g(args):
@@ -215,10 +311,10 @@ def splitpoint(*arg, **kwargs):
     - output: If given, it should be a queue-like object (offering the
       .put(obj) method). The annotated function's results will then be put
       in the output
-    - instances: Determines how many processes should run the function.
+    - instances: Determines how many workers should run the function.
       Each of the processes will have the value parallel.splitno set to
       a unique value between 0 (incl.) and instances (excl.).
-    - queuesize: Given as an argument to a multiprocessing.JoinableQueue
+    - queuesize: Maximum number of calls waiting in the input queue
       which holds arguments to the annotated function while they wait for
       an idle process that will pass them on to the annotated function.
       The argument decides the maximum number of calls that can wait in the
@@ -258,10 +354,48 @@ def splitpoint(*arg, **kwargs):
                     output.put(res)
 
             return sillywrapper
-        # Else set up processes
-        input = multiprocessing.JoinableQueue(queuesize)
+        if _portable(func):
+            input_queue = interpreters.create_queue(queuesize)
+            ack = interpreters.create_queue()
+            errors = interpreters.create_queue()
+            results = interpreters.create_queue() if output is not None else None
+            threads = []
+            for n in range(instances):
+                interp = interpreters.create()
+                thread = _start_worker(
+                    interp,
+                    _interpreter_split_worker, func, input_queue, results, ack,
+                    errors, n,
+                )
+                threads.append((interp, thread))
+            state = {"queue": input_queue, "ack": ack, "errors": errors,
+                     "threads": threads, "submitted": 0, "completed": 0,
+                     "closed": False}
+            if results is not None:
+                def dispatch():
+                    while True:
+                        try:
+                            output.put(results.get())
+                            ack.put(None)
+                        except BaseException:
+                            errors.put(traceback.format_exc())
+                            return
+                threading.Thread(target=dispatch, daemon=True).start()
+            _interpreter_splits.append(state)
+
+            def wrapper(*args, **kw):
+                if state["closed"]:
+                    raise RuntimeError("This splitpoint has been ended")
+                input_queue.put((args, kw))
+                state["submitted"] += 1
+
+            return wrapper
+
+        # Live closures and non-serialisable state require fork inheritance.
+        context = _process_context()
+        input = context.JoinableQueue(queuesize)
         for n in range(instances):
-            p = multiprocessing.Process(
+            p = context.Process(
                 target=_splitprocess, args=(func, input, output, n)
             )
             p.name = "Process-%d for %s" % (n, func.__name__)
@@ -283,10 +417,31 @@ def splitpoint(*arg, **kwargs):
 
 
 def endsplits():
-    """Wait for all splitpoints to finish"""
+    """Wait for all splitpoints and stop their interpreter workers.
+
+    Calls to an interpreter-backed splitpoint after this are rejected.
+    """
     global _splitpointqueues
     for q in _splitpointqueues:
         q.join()
+    for state in _interpreter_splits:
+        if state["closed"]:
+            continue
+        try:
+            while state["completed"] < state["submitted"]:
+                _wait_ack(state["ack"], state["errors"], state["threads"][0][1])
+                state["completed"] += 1
+        finally:
+            state["closed"] = True
+            for _ in state["threads"]:
+                try:
+                    state["queue"].put((None, None), timeout=0.1)
+                except Full:
+                    break
+            for interp, thread in state["threads"]:
+                thread.join(timeout=1)
+                if not thread.is_alive():
+                    interp.close()
 
 
 # Stuff for (function) flows
@@ -321,7 +476,7 @@ def _flowprocess(func, input, output, inclosed, outclosed):
 
 
 class Flow(object):
-    """A Flow consists of different functions running in different processes.
+    """The legacy process-backed implementation of a flow.
     A Flow should be created by calling createflow.
     """
 
@@ -424,6 +579,142 @@ class Flow(object):
         return True
 
 
+class _InterpreterFlow(Flow):
+    """A pipeline with one persistent interpreter per stage."""
+
+    def __init__(self, stages, batchsize, queuesize):
+        self._queues = [interpreters.create_queue(queuesize)
+                        for _ in range(len(stages) + 1)]
+        self._acks = [interpreters.create_queue() for _ in stages]
+        self._errors = interpreters.create_queue()
+        self._workers = []
+        self._batchsize = batchsize
+        self._batch = []
+        self._resultbatch = []
+        self._submitted = 0
+        self._completed = [0 for _ in stages]
+        self._closed = False
+        self._finished = False
+        self._finalized = False
+        for i, funcs in enumerate(stages):
+            interp = interpreters.create()
+            thread = _start_worker(
+                interp,
+                _interpreter_flow_worker, funcs, self._queues[i],
+                self._queues[i + 1], self._acks[i], self._errors,
+            )
+            self._workers.append((interp, thread))
+
+    def __call__(self, *args):
+        self.process(*args)
+
+    def process(self, *args):
+        if self._closed:
+            raise RuntimeError("The flow is closed")
+        self._batch.append(args)
+        if len(self._batch) >= self._batchsize:
+            self._flush()
+
+    def _flush(self):
+        if self._batch:
+            self._queues[0].put(self._batch)
+            self._submitted += 1
+            self._batch = []
+
+    def _check(self):
+        for _, thread in self._workers:
+            try:
+                message = self._errors.get_nowait()
+            except Empty:
+                if not thread.is_alive() and not self._finished:
+                    # A normal worker may have exited after close. Errors
+                    # are reported through the shared error queue instead.
+                    if not self._closed:
+                        raise RuntimeError("Flow worker exited unexpectedly")
+            else:
+                self._closed = True
+                for queue in self._queues[:-1]:
+                    try:
+                        queue.put_nowait(None)
+                    except Full:
+                        pass
+                for interp, worker in self._workers:
+                    worker.join(timeout=1)
+                    if not worker.is_alive():
+                        interp.close()
+                self._finalized = True
+                raise RuntimeError("Flow worker failed:\n" + message)
+
+    def _finalize(self):
+        if not self._finalized:
+            for interp, thread in self._workers:
+                thread.join()
+                interp.close()
+            self._finalized = True
+
+    def get(self):
+        if self._resultbatch:
+            args = self._resultbatch.pop()
+            return args[0] if len(args) == 1 else args
+        if self._finished:
+            raise Empty()
+        while True:
+            try:
+                batch = self._queues[-1].get(timeout=0.1)
+            except Empty:
+                self._check()
+                continue
+            if batch is None:
+                self._finished = True
+                self._finalize()
+                raise Empty()
+            batch.reverse()
+            self._resultbatch = batch
+            args = self._resultbatch.pop()
+            return args[0] if len(args) == 1 else args
+
+    def getall(self):
+        results = []
+        try:
+            while True:
+                results.append(self.get())
+        except Empty:
+            return results
+
+    def __iter__(self):
+        try:
+            while True:
+                yield self.get()
+        except Empty:
+            return
+
+    def join(self):
+        self._flush()
+        for i, ack in enumerate(self._acks):
+            while self._completed[i] < self._submitted:
+                try:
+                    ack.get(timeout=0.1)
+                    self._completed[i] += 1
+                except Empty:
+                    self._check()
+        self._check()
+
+    def close(self):
+        if not self._closed:
+            self._flush()
+            self._closed = True
+            self._queues[0].put(None)
+
+    @property
+    def finished(self):
+        self._check()
+        done = self._finished or (self._closed and
+                                  all(not t.is_alive() for _, t in self._workers))
+        if done:
+            self._finalize()
+        return done
+
+
 def _buildgroupfunction(funcseq):
     def groupfunc(*args):
         for f in funcseq:
@@ -436,16 +727,17 @@ def _buildgroupfunction(funcseq):
 
 
 def createflow(*functions, **options):
-    """Create a flow of functions running in different processes.
+    """Create a flow of functions running in isolated workers.
 
     A Flow object ready for use is returned.
 
-    A flow consists of several functions running in several processes.
+    On CPython 3.14+, importable, picklable functions run in one
+    subinterpreter per stage. Live closures fall back to forked processes.
     A flow created by
 
         flow = createflow(f1, f2, f3)
 
-    uses three processes. Data can be inserted into the flow by calling it
+    uses three workers. Data can be inserted into the flow by calling it
     as in flow(data). The argument data is then first processed by f1(data),
     then f2(data), and finally f3(data). Return values from f1, f2, and f3
     are *not* preserved, but their side-effects are. The functions in a flow
@@ -469,10 +761,10 @@ def createflow(*functions, **options):
     Arguments:
 
     - *functions: A sequence of functions of sequences of functions.
-      Each element in the sequence will be executed in a separate process.
+      Each element in the sequence will be executed in a separate worker.
       For example, the argument (f1, (f2, f3), f4) leads to that
-      f1 executes in process-1, f2 and f3 execute in process-2, and f4
-      executes in process-3.
+      f1 executes in worker-1, f2 and f3 execute in worker-2, and f4
+      executes in worker-3.
       The functions in the sequence should all accept the same number of
       arguments.
     - **options: keyword arguments configuring details. The considered
@@ -490,16 +782,18 @@ def createflow(*functions, **options):
     # A special case
     if not functions:
         return Flow(
-            [multiprocessing.JoinableQueue()],
-            [multiprocessing.Value("b", 0)],
+            [_process_context().JoinableQueue()],
+            [_process_context().Value("b", 0)],
             1,
         )
 
     # Create functions that invoke a group of functions if needed
     resultfuncs = []
+    stages = []
     for item in functions:
         if callable(item):
             resultfuncs.append(item)
+            stages.append((item,))
         else:
             # Check the arguments
             if not hasattr(item, "__iter__"):
@@ -510,6 +804,7 @@ def createflow(*functions, **options):
             # We can - finally - create the function
             groupfunc = _buildgroupfunction(item)
             resultfuncs.append(groupfunc)
+            stages.append(tuple(item))
 
     # resultfuncs are now the functions we need to deal with.
     # Each function in resultfuncs should run in a separate process
@@ -517,11 +812,15 @@ def createflow(*functions, **options):
     batchsize = ("batchsize" in options and options["batchsize"]) or 25
     if batchsize < 1:
         batchsize = 25
-    queues = [multiprocessing.JoinableQueue(queuesize) for f in resultfuncs]
-    queues.append(multiprocessing.JoinableQueue(queuesize))  # for the results
-    closed = [multiprocessing.Value("b", 0) for q in queues]  # in shared mem
+    if all(_portable(f) for stage in stages for f in stage):
+        return _InterpreterFlow(stages, batchsize, queuesize)
+
+    context = _process_context()
+    queues = [context.JoinableQueue(queuesize) for f in resultfuncs]
+    queues.append(context.JoinableQueue(queuesize))  # for the results
+    closed = [context.Value("b", 0) for q in queues]  # in shared mem
     for i in range(len(resultfuncs)):
-        p = multiprocessing.Process(
+        p = context.Process(
             target=_flowprocess,
             args=(
                 resultfuncs[i],
@@ -599,9 +898,23 @@ class Decoupled(object):
         self.__batch = []
         self.__results = {}
         self.autowrap = autowrap
-        self.__toworker = multiprocessing.JoinableQueue(queuesize)
+        self.__backend = (
+            "interpreter" if _portable(obj) and
+            all(getattr(d, "_Decoupled__backend", None) == "interpreter"
+                for d in consumes) else "process"
+        )
+        if self.__backend == "process" and any(
+            getattr(d, "_Decoupled__backend", None) == "interpreter"
+            for d in consumes
+        ):
+            raise TypeError("A process-backed Decoupled object cannot consume "
+                            "subinterpreter results")
+        context = _process_context() if self.__backend == "process" else None
+        self.__toworker = (interpreters.create_queue(queuesize)
+                           if context is None else context.JoinableQueue(queuesize))
         if returnvalues:
-            self.__fromworker = multiprocessing.JoinableQueue(queuesize)
+            self.__fromworker = (interpreters.create_queue(queuesize)
+                                 if context is None else context.JoinableQueue(queuesize))
         else:
             self.__fromworker = None
         self.__otherqueues = dict(
@@ -611,13 +924,24 @@ class Decoupled(object):
         self.__otherresults = {}
         self.__directupdates = directupdatepositions
 
-        self.__worker = multiprocessing.Process(target=self.__decoupledworker)
-        self.__worker.daemon = True
-        self.__worker.name = "Process for %s object for %s" % (
-            self.__class__.__name__,
-            getattr(obj, "name", "an unnamed object"),
-        )
-        self.__worker.start()
+        self.__queued = 0
+        self.__acked = 0
+        if context is None:
+            self.__acks = interpreters.create_queue()
+            self.__errors = interpreters.create_queue()
+            # The copy in the interpreter owns the object and its mutations.
+            self.__interpreter = interpreters.create()
+            self.__worker = _start_worker(
+                self.__interpreter, _interpreter_decoupled_worker, self,
+            )
+        else:
+            self.__worker = context.Process(target=self.__decoupledworker)
+            self.__worker.daemon = True
+            self.__worker.name = "Process for %s object for %s" % (
+                self.__class__.__name__,
+                getattr(obj, "name", "an unnamed object"),
+            )
+            self.__worker.start()
 
     # Stuff for the forked process
 
@@ -677,7 +1001,8 @@ class Decoupled(object):
                 raise ValueError("Positions must be of length 2 or 3")
 
     def __decoupledworker(self):
-        sys.excepthook = _getexcepthook()
+        if self.__backend == "process":
+            sys.excepthook = _getexcepthook()
         if hasattr(self._obj, "_decoupled") and callable(self._obj._decoupled):
             self._obj._decoupled()
 
@@ -688,7 +1013,10 @@ class Decoupled(object):
             batch = self.__toworker.get()
             ###
             if batch == "STOP":
-                self.__toworker.task_done()
+                if self.__backend == "process":
+                    self.__toworker.task_done()
+                else:
+                    self.__acks.put(None)
                 return
             ###
             resbatch = []
@@ -709,12 +1037,19 @@ class Decoupled(object):
                     resbatch.append((id, res))
             if self.__fromworker and resbatch:
                 self.__fromworker.put(resbatch)
-            self.__toworker.task_done()
+            if self.__backend == "process":
+                self.__toworker.task_done()
+            else:
+                self.__acks.put(None)
 
     # Stuff for the parent process
 
     def __getattr__(self, name):
-        res = getattr(self._obj, name)
+        try:
+            obj = object.__getattribute__(self, "_obj")
+        except AttributeError:
+            raise AttributeError(name) from None
+        res = getattr(obj, name)
         if callable(res) and self.autowrap:
 
             def wrapperfunc(*args):
@@ -748,16 +1083,30 @@ class Decoupled(object):
             if future.id in self.__results:
                 return self.__results.pop(future.id)
             # else wait for results to become available
-            self.__results.update(self.__fromworker.get())
+            if self.__backend == "interpreter":
+                try:
+                    batch = self.__fromworker.get(timeout=0.1)
+                except Empty:
+                    _check_worker(self.__errors, self.__worker)
+                    continue
+            else:
+                batch = self.__fromworker.get()
+            self.__results.update(batch)
 
     def _endbatch(self):
         if self.__batch:
             self.__toworker.put(self.__batch)
+            self.__queued += 1
             self.__batch = []
 
     def _join(self):
         self._endbatch()
-        self.__toworker.join()
+        if self.__backend == "process":
+            self.__toworker.join()
+        else:
+            while self.__acked < self.__queued:
+                _wait_ack(self.__acks, self.__errors, self.__worker)
+                self.__acked += 1
 
     def shutdowndecoupled(self):
         """Let the Decoupled instance finish its tasks and stop it.
@@ -766,10 +1115,15 @@ class Decoupled(object):
         """
         self._join()
         self.__toworker.put("STOP")
-        self.__toworker.join()
-        self.__toworker.close()
-        if self.__fromworker is not None:
-            self.__fromworker.close()
+        if self.__backend == "process":
+            self.__toworker.join()
+            self.__toworker.close()
+            if self.__fromworker is not None:
+                self.__fromworker.close()
+        else:
+            _wait_ack(self.__acks, self.__errors, self.__worker)
+            self.__worker.join()
+            self.__interpreter.close()
         try:
             pygrametl._alltables.remove(self)
         except ValueError:
@@ -1073,9 +1427,10 @@ def shareconnectionwrapper(targetconnection, maxclients=10, userfuncs=()):
     - userfuncs: a sequence of functions to add to the shared
       ConnectionWrapper. Default: ()
     """
-    toserver = multiprocessing.JoinableQueue(5000)
-    toclients = [multiprocessing.Queue() for i in range(maxclients)]
-    freelines = multiprocessing.Queue()
+    context = _process_context()
+    toserver = context.JoinableQueue(5000)
+    toclients = [context.Queue() for i in range(maxclients)]
+    freelines = context.Queue()
     for i in range(maxclients):
         freelines.put(i)
     serverCW = SharedConnectionWrapperServer(targetconnection, toserver, toclients)
@@ -1104,7 +1459,7 @@ def shareconnectionwrapper(targetconnection, maxclients=10, userfuncs=()):
                 raise ValueError("Illegal function name: " + func.__name__)
             setattr(serverCW, "_userfunc_" + func.__name__, func)
             userfuncnames.append(func.__name__)
-    serverprocess = multiprocessing.Process(target=serverCW.worker)
+    serverprocess = context.Process(target=serverCW.worker)
     serverprocess.name = "Process for shared connection wrapper"
     serverprocess.daemon = True
     serverprocess.start()
@@ -1142,18 +1497,17 @@ def getsharedsequencefactory(startvalue, intervallen=5000):
         startvalue = 0
 
     # We use a Queue to ensure that intervals are only given to one deliverer
-    values = multiprocessing.Queue(10)
+    context = _process_context()
+    values = context.Queue(10)
 
-    # A worker that fills the queue
+    # A daemon thread fills the IPC queue. Legacy process-backed readers can
+    # still use the same queue without another dedicated process.
     def valuegenerator(nextval):
-        sys.excepthook = _getexcepthook()
         while True:
             values.put((nextval, nextval + intervallen))
             nextval += intervallen
 
-    p = multiprocessing.Process(target=valuegenerator, args=(startvalue,))
-    p.daemon = True
-    p.start()
+    threading.Thread(target=valuegenerator, args=(startvalue,), daemon=True).start()
 
     # A generator that repeatedly gets an interval from the queue and returns
     # all numbers in that interval before it gets a new interval and goes on
