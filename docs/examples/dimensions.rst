@@ -8,7 +8,7 @@ star and snowflake schemas as well as type 1, type 2, and combined type 1 and
 type 2 slowly changing dimensions. The abstractions can be used for both
 sequential and parallel loading of data into dimensions. For more information
 about the parallel capabilities of pygrametl see :ref:`parallel`. The following
-examples use PostgreSQL as the RDBMS and psycopg2 as the database driver.
+examples use PostgreSQL as the RDBMS and psycopg as the database driver.
 
 All of following classes are currently implemented in the
 :mod:`.pygrametl.tables` module.
@@ -34,7 +34,7 @@ fails, and a function for expanding a row automatically.
 
 .. code-block:: python
 
-    import psycopg2
+    import psycopg
     import pygrametl
     from pygrametl.tables import Dimension
 
@@ -51,7 +51,7 @@ fails, and a function for expanding a row automatically.
     ]
 
     # The actual database connection is handled by a PEP 249 connection
-    pgconn = psycopg2.connect("""host='localhost' dbname='dw' user='dwuser'
+    pgconn = psycopg.connect("""host='localhost' dbname='dw' user='dwuser'
 			      password='dwpass'""")
 
     # This ConnectionWrapper will be set as a default and is then implicitly
@@ -100,13 +100,13 @@ a simple-to-miss violation of this.
 
 .. code-block:: python
 
-    import psycopg2
+    import psycopg
     import pygrametl
     from pygrametl.datasources import CSVSource
     from pygrametl.tables import CachedDimension, FactTable
 
     # The actual database connection is handled by a PEP 249 connection
-    pgconn = psycopg2.connect("""host='localhost' dbname='dw' user='dwuser'
+    pgconn = psycopg.connect("""host='localhost' dbname='dw' user='dwuser'
 			      password='dwpass'""")
 
     # This ConnectionWrapper will be set as a default and is then implicitly
@@ -206,13 +206,14 @@ RDBMS.
 .. code-block:: python
 
     import sqlite3
-    import psycopg2
+    import psycopg
+    from psycopg import sql
     import pygrametl
     from pygrametl.datasources import SQLSource
     from pygrametl.tables import BulkDimension
 
     # The actual database connection is handled by a PEP 249 connection
-    pgconn = psycopg2.connect("""host='localhost' dbname='dw' user='dwuser'
+    pgconn = psycopg.connect("""host='localhost' dbname='dw' user='dwuser'
 			      password='dwpass'""")
 
     # This ConnectionWrapper will be set as a default and is then implicitly
@@ -221,14 +222,23 @@ RDBMS.
     conn = pygrametl.ConnectionWrapper(connection=pgconn)
 
 
-    # This function bulk loads a file into PostgreSQL using psycopg2
+    # This function bulk loads a file into PostgreSQL using psycopg
     def pgbulkloader(name, attributes, fieldsep, rowsep, nullval, filehandle):
 	cursor = conn.cursor()
-	# psycopg2 does not accept the default value used to represent NULL
-	# bv BulkDimension, which is None. Here this is ignored as we have no
-	# NULL values that we wish to substitute for a more descriptive value
-	cursor.copy_from(file=filehandle, table=name, sep=fieldsep,
-			 columns=attributes)
+	copy_sql = sql.SQL(
+        "COPY {} ({}) FROM STDIN WITH (FORMAT csv, DELIMITER {}, NULL {})"
+	).format(
+		sql.Identifier(name),
+		sql.SQL(", ").join(sql.Identifier(attribute) for attribute in attributes),
+		sql.Literal(fieldsep),
+        sql.Literal(nullval if nullval is not None else "\\N"),
+	)
+	with cursor.copy(copy_sql) as copy:
+		while True:
+			data = filehandle.read(8192)
+			if not data:
+				break
+			copy.write(data)
 
 
     # In addition to arguments needed for a Dimension, a reference to the
@@ -264,7 +274,7 @@ process is a good use case for :class:`.BulkDimension` as
 :meth:`.BulkDimension.update`, :meth:`.BulkDimension.getbykey` and
 :meth:`.BulkDimension.getbyval` are not used, so no additional calls to
 :meth:`.BulkDimension.endload` are made. By bulk loading the rows from a file
-using :meth:`copy_from` instead of inserting them one at a time, the time
+using :meth:`~psycopg.Cursor.copy` instead of inserting them one at a time, the time
 required to load the dimension is significantly reduced. However, it is
 important that :meth:`.ConnectionWrapper.commit()` is executed after all rows
 have been inserted into :class:`.BulkDimension` as it ensures that the last set
@@ -334,7 +344,7 @@ coercion can break this assumption.
 
 .. code-block:: python
 
-    import psycopg2
+    import psycopg
     import pygrametl
     from pygrametl.tables import TypeOneSlowlyChangingDimension
 
@@ -351,7 +361,7 @@ coercion can break this assumption.
     ]
 
     # The actual database connection is handled by a PEP 249 connection
-    pgconn = psycopg2.connect("""host='localhost' dbname='dw' user='dwuser'
+    pgconn = psycopg.connect("""host='localhost' dbname='dw' user='dwuser'
 			      password='dwpass'""")
 
     # This ConnectionWrapper will be set as a default and is then implicitly
@@ -412,7 +422,7 @@ of a member that was valid at given time by using
 
 .. code-block:: python
 
-    import psycopg2
+    import psycopg
     import pygrametl
     from pygrametl.tables import SlowlyChangingDimension
 
@@ -437,7 +447,7 @@ of a member that was valid at given time by using
     ]
 
     # The actual database connection is handled by a PEP 249 connection
-    pgconn = psycopg2.connect("""host='localhost' dbname='dw' user='dwuser'
+    pgconn = psycopg.connect("""host='localhost' dbname='dw' user='dwuser'
 			      password='dwpass'""")
 
     # This ConnectionWrapper will be set as a default and is then implicitly
@@ -530,7 +540,7 @@ experimental.
 
 .. code-block:: python
 
-    import psycopg2
+    import psycopg
     import pygrametl
     from pygrametl.tables import CachedDimension, SnowflakedDimension
 
@@ -555,7 +565,7 @@ experimental.
     ]
 
     # The actual database connection is handled by a PEP 249 connection
-    pgconn = psycopg2.connect("""host='localhost' dbname='dw' user='dwuser'
+    pgconn = psycopg.connect("""host='localhost' dbname='dw' user='dwuser'
 			      password='dwpass'""")
 
     # This ConnectionWrapper will be set as a default and is then implicitly
@@ -621,7 +631,7 @@ operates on.
 
 .. code-block:: python
 
-    import psycopg2
+    import psycopg
     import pygrametl
     from pygrametl.tables import CachedDimension, SnowflakedDimension, \
 	SlowlyChangingDimension
@@ -647,7 +657,7 @@ operates on.
     ]
 
     # The actual database connection is handled by a PEP 249 connection
-    pgconn = psycopg2.connect("""host='localhost' dbname='dw' user='dwuser'
+    pgconn = psycopg.connect("""host='localhost' dbname='dw' user='dwuser'
 			      password='dwpass'""")
 
     # This ConnectionWrapper will be set as a default and is then implicitly

@@ -33,20 +33,31 @@ must have the following signature:
 
 PostgreSQL
 ----------
-For PostgreSQL the `copy_expert
-<https://www.psycopg.org/docs/cursor.html#cursor.copy_expert>`__ method from
-psycopg2 can be used:
+For PostgreSQL the `copy
+<https://www.psycopg.org/psycopg3/docs/basic/copy.html>`__ method from
+psycopg can be used:
 
 .. code-block:: python
 
-    # psycopg2
+    import psycopg
+    from psycopg import sql
+
     def pgbulkloader(name, attributes, fieldsep, rowsep, nullval, filehandle):
 	global connection
-	cursor = connection.cursor()
-	cursor.copy_expert(
-		f"COPY {name} ({','.join(attributes)}) FROM STDIN WITH (FORMAT csv, DELIMITER '{fieldsep}', NULL '{nullval}');",
-		filehandle
+	copy_sql = sql.SQL(
+		"COPY {} ({}) FROM STDIN WITH (FORMAT csv, DELIMITER {}, NULL {})"
+	).format(
+		sql.Identifier(name),
+		sql.SQL(", ").join(sql.Identifier(attribute) for attribute in attributes),
+		sql.Literal(fieldsep),
+		sql.Literal(nullval if nullval is not None else "\\N"),
 	)
+	with connection.cursor().copy(copy_sql) as copy:
+		while True:
+			data = filehandle.read(8192)
+			if not data:
+				break
+			copy.write(data)
 
 If Jython is used the `copyIn
 <https://jdbc.postgresql.org/documentation/publicapi/org/postgresql/copy/CopyManager.html#copyIn-java.lang.String->`__

@@ -7,7 +7,7 @@ enable facts to be loaded one at a time, as batches stored in memory, or in
 bulk from a file on disk. Support for loading facts with missing information and
 then updating them later is also supported. For information about how to load
 facts in parallel see :ref:`parallel`. In the following examples, we use
-PostgreSQL as the RDBMS and psycopg2 as the database driver.
+PostgreSQL as the RDBMS and psycopg as the database driver.
 
 All of the following classes are currently implemented in the
 :mod:`.pygrametl.tables` module.
@@ -28,12 +28,12 @@ bottleneck.
 
 .. code-block:: python
 
-    import psycopg2
+    import psycopg
     import pygrametl
     from pygrametl.tables import FactTable
 
     # The actual database connection is handled by a PEP 249 connection
-    pgconn = psycopg2.connect("""host='localhost' dbname='dw' user='dwuser'
+    pgconn = psycopg.connect("""host='localhost' dbname='dw' user='dwuser'
 			      password='dwpass'""")
 
     # This ConnectionWrapper will be set as a default and is then implicitly
@@ -68,12 +68,12 @@ seen below, where the fact table from the last example is reused.
 
 .. code-block:: python
 
-    import psycopg2
+    import psycopg
     import pygrametl
     from pygrametl.tables import FactTable
 
     # The actual database connection is handled by a PEP 249 connection
-    pgconn = psycopg2.connect("""host='localhost' dbname='dw' user='dwuser'
+    pgconn = psycopg.connect("""host='localhost' dbname='dw' user='dwuser'
 			      password='dwpass'""")
 
     # This ConnectionWrapper will be set as a default and is then implicitly
@@ -181,11 +181,12 @@ how to bulk loading data into other RDBMSs see :ref:`bulkloading`.
 
 .. code-block:: python
 
-    import psycopg2
+    import psycopg
+    from psycopg import sql
     import pygrametl
     from pygrametl.tables import BulkFactTable
 
-    pgconn = psycopg2.connect("""host='localhost' dbname='dw' user='dwuser'
+    pgconn = psycopg.connect("""host='localhost' dbname='dw' user='dwuser'
 			      password='dwpass'""")
 
     conn = pygrametl.ConnectionWrapper(connection=pgconn)
@@ -196,14 +197,23 @@ how to bulk loading data into other RDBMSs see :ref:`bulkloading`.
 	     {'storeid': 3, 'productid':  9, 'dateid': 4, 'price': 25}]
 
 
-    # This function bulk loads a file into PostgreSQL using psycopg2
+    # This function bulk loads a file into PostgreSQL using psycopg
     def pgbulkloader(name, attributes, fieldsep, rowsep, nullval, filehandle):
 	cursor = conn.cursor()
-	# psycopg2 does not accept the default value used to represent NULL
-	# by BulkDimension, which is None. Here this is ignored as we have no
-	# NULL values that we wish to substitute for a more descriptive value
-	cursor.copy_from(file=filehandle, table=name, sep=fieldsep,
-			 columns=attributes)
+	copy_sql = sql.SQL(
+        "COPY {} ({}) FROM STDIN WITH (FORMAT csv, DELIMITER {}, NULL {})"
+	).format(
+		sql.Identifier(name),
+		sql.SQL(", ").join(sql.Identifier(attribute) for attribute in attributes),
+		sql.Literal(fieldsep),
+        sql.Literal(nullval if nullval is not None else "\\N"),
+	)
+	with cursor.copy(copy_sql) as copy:
+		while True:
+			data = filehandle.read(8192)
+			if not data:
+				break
+			copy.write(data)
 
 
     # The bulk loading function must be passed to BulkFactTable's constructor
@@ -234,12 +244,12 @@ following example illustrates how to create the class:
 
 .. code-block:: python
 
-    import psycopg2
+    import psycopg
     import pygrametl
     from pygrametl.tables import AccumulatingSnapshotFactTable
 
     # The actual database connection is handled by a PEP 249 connection
-    pgconn = psycopg2.connect("""host='localhost' dbname='dw' user='dwuser'
+    pgconn = psycopg.connect("""host='localhost' dbname='dw' user='dwuser'
 			      password='dwpass'""")
 
     # This ConnectionWrapper will be set as a default and is then implicitly
@@ -292,12 +302,12 @@ how to use the class can be seen below:
 
 .. code-block:: python
 
-    import psycopg2
+    import psycopg
     import pygrametl
     from pygrametl.tables import AccumulatingSnapshotFactTable
 
     # The actual database connection is handled by a PEP 249 connection
-    pgconn = psycopg2.connect("""host='localhost' dbname='dw' user='dwuser'
+    pgconn = psycopg.connect("""host='localhost' dbname='dw' user='dwuser'
 			      password='dwpass'""")
 
     # A factexpander can be used to modify a row only if it has been updated, note

@@ -22,14 +22,14 @@ SQLSource
 :class:`.SQLSource` is a data source used to iterate over the results of a
 single SQL query. The data source's constructor must be passed a :PEP:`249`
 connection and not a :class:`.ConnectionWrapper`. As an example, a PostgreSQL
-connection created using the psycopg2 package is used below:
+connection created using the psycopg package is used below:
 
 .. code-block:: python
 
-    import psycopg2
+    import psycopg
     from pygrametl.datasources import SQLSource
 
-    conn = psycopg2.connect(database='db', user='dbuser', password='dbpass')
+    conn = psycopg.connect(database='db', user='dbuser', password='dbpass')
     sqlSource = SQLSource(connection=conn, query='SELECT * FROM table')
 
 In the above example, an :class:`.SQLSource` is created in order to extract all
@@ -41,10 +41,10 @@ supplied names must match the number of elements in the result:
 
 .. code-block:: python
 
-    import psycopg2
+    import psycopg
     from pygrametl.datasources import SQLSource
 
-    conn = psycopg2.connect(database='db', user='dbuser', password='dbpass')
+    conn = psycopg.connect(database='db', user='dbuser', password='dbpass')
     sqlSource = SQLSource(connection=conn, query='SELECT * FROM table',
 			  names=('id', 'name', 'price'))
 
@@ -55,10 +55,10 @@ created and then used in the query:
 
 .. code-block:: python
 
-    import psycopg2
+    import psycopg
     from pygrametl.datasources import SQLSource
 
-    conn = psycopg2.connect(database='db', user='dbuser', password='dbpass')
+    conn = psycopg.connect(database='db', user='dbuser', password='dbpass')
     sqlSource = SQLSource(connection=conn, query='SELECT * FROM view',
 	initsql='CREATE VIEW view AS SELECT id, name FROM table WHERE price > 10')
 

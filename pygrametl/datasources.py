@@ -197,7 +197,7 @@ class SQLSource(object):
                     # We do this to support cursor objects that only have
                     # a meaningful .description after data has been fetched.
                     # This is, for example, the case when using a named
-                    # psycopg2 cursor.
+                    # psycopg cursor.
                     names = [t[0] for t in self.cursor.description]
                 if len(names) != len(data[0]):
                     raise ValueError(

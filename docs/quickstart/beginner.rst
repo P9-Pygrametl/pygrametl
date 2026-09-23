@@ -95,7 +95,7 @@ database, the :attr:`dwuser` role with all privileges, and the four tables::
     psql -f example.sql
 
 For the ETL flow we start by importing the various functions and classes needed
-in this beginner guide. The psycopg2 and sqlite3 database drivers must be
+in this beginner guide. The psycopg and sqlite3 database drivers must be
 imported so a connection to PostgreSQL and SQLite can be established. The main
 pygrametl module is also imported so a :class:`.ConnectionWrapper` can be
 created. pyggrametl's :mod:`.datasources` module is imported so the sales
@@ -106,8 +106,8 @@ the various dimensions (:class:`.CachedDimension`) are imported from
 
 .. code-block:: python
 
-    # psycopg2 is a database driver allowing CPython to access PostgreSQL
-    import psycopg2
+    # psycopg is a database driver allowing CPython to access PostgreSQL
+    import psycopg
 
     # sqlite3 is a database driver allowing CPython to access SQLite
     import sqlite3
@@ -145,13 +145,13 @@ information about database connections in pygrametl see :ref:`database`.
     # driver can be used with pygrametl. For example, SQLite can be replaced
     # with PostgreSQL by simply replacing sale_conn with following two lines
     # sale_string = "host='localhost' dbname='sale' user='user' password='pass'"
-    # sale_conn = psycopg2.connect(sale_string)
+    # sale_conn = psycopg.connect(sale_string)
 
     # A connection is also created to the data warehouse. The connection is
     # then given to a ConnectionWrapper so it becomes implicitly shared between
     # all the pygrametl abstractions that needs it without being passed around
     dw_string = "host='localhost' dbname='dw' user='dwuser' password='dwpass'"
-    dw_conn = psycopg2.connect(dw_string)
+    dw_conn = psycopg.connect(dw_string)
 
     # Although the ConnectionWrapper is shared automatically between pygrametl
     # abstractions, it is saved in a variable so the connection can be closed
@@ -341,7 +341,7 @@ automated repeatable tests (see :ref:`testing`).
 
 .. code-block:: python
 
-    import psycopg2
+    import psycopg
     import sqlite3
     import pygrametl
     from pygrametl.datasources import SQLSource, CSVSource
@@ -352,7 +352,7 @@ automated repeatable tests (see :ref:`testing`).
             detect_types=sqlite3.PARSE_DECLTYPES)
 
     dw_string = "host='localhost' dbname='dw' user='dwuser' password='dwpass'"
-    dw_conn = psycopg2.connect(dw_string)
+    dw_conn = psycopg.connect(dw_string)
     dw_conn_wrapper = pygrametl.ConnectionWrapper(connection=dw_conn)
 
     # Creation of data sources for the sales database and the CSV file

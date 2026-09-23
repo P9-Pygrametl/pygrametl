@@ -66,6 +66,17 @@ of the following commands: ::
     # Install pygrametl to the user's local package directory
     $ pip install pygrametl --user
 
+Using PostgreSQL
+################
+The PostgreSQL examples use the optional `Psycopg 3
+<https://www.psycopg.org/psycopg3/>`__ database driver. Install its binary
+distribution with pip when running those examples::
+
+    $ pip install "psycopg[binary]"
+
+pygrametl itself has no mandatory database-driver dependencies, so applications
+can choose the Psycopg installation appropriate for their deployment.
+
 Install from PyPI with conda
 ############################
 conda is an alternative package manager for Python. It is bundled with the
