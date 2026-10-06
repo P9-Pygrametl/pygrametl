@@ -28,6 +28,7 @@ Note that this module in many cases will give better results with Jython
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 import copy
+import importlib
 import os
 from sys import version_info
 import sys
@@ -61,6 +62,33 @@ import freethreading  # <-- Add this import
 from freethreading import Queue, Worker
 if hasattr(freethreading, 'disable_pickle_validation'):
     freethreading.disable_pickle_validation()
+
+
+def _identity(value):
+    return value
+
+
+class _SharedConnectionWrapperUserFunction(object):
+    def __init__(self, toserver, fromserver, freelines, funcname):
+        self.__clientid = None
+        self.__toserver = toserver
+        self.__fromserver = fromserver
+        self.__freelines = freelines
+        self.__funcname = funcname
+
+    def __del__(self):
+        if self.__clientid is not None:
+            self.__freelines.put(self.__clientid)
+
+    def __connecttoSCWserver(self):
+        self.__clientid = self.__freelines.get()
+
+    def __call__(self, *args):
+        if self.__clientid is None:
+            self.__connecttoSCWserver()
+        self.__toserver.put((self.__clientid, "_userfunc_" + self.__funcname, args))
+        res = self.__fromserver[self.__clientid].get()
+        assert res == "USERFUNC"
 
 __all__ = [
     "splitpoint",
@@ -161,6 +189,37 @@ def _getexcepthook():
         exit()
 
     return excepthook
+
+
+def _sharedsequence_valuegenerator(values, intervallen, nextval):
+    sys.excepthook = _getexcepthook()
+    while True:
+        values.put((nextval, nextval + intervallen))
+        nextval += intervallen
+
+
+class _SharedSequenceGetter(object):
+    def __init__(self, values):
+        self.__values = values
+        self.__current = None
+        self.__nextvalue = None
+
+    def __call__(self, *ignored):
+        if self.__current is None or self.__nextvalue >= self.__current[1]:
+            self.__current = self.__values.get()
+            self.__nextvalue = self.__current[0]
+
+        value = self.__nextvalue
+        self.__nextvalue += 1
+        return value
+
+
+class _SharedSequenceFactory(object):
+    def __init__(self, values):
+        self.__values = values
+
+    def __call__(self):
+        return _SharedSequenceGetter(self.__values)
 
 
 # Stuff for @splitpoint
@@ -803,12 +862,15 @@ class SharedConnectionWrapperClient(object):
         connectionmodule,
         userfuncnames=(),
     ):
-        self.nametranslator = lambda s: s
+        self.nametranslator = _identity
         self.__clientid = None
         self.__toserver = toserver
         self.__fromserver = fromserver
         self.__freelines = freelines
-        self.__connectionmodule = connectionmodule
+        if hasattr(connectionmodule, "__name__"):
+            self.__connectionmodulename = connectionmodule.__name__
+        else:
+            self.__connectionmodulename = connectionmodule
         self.__userfuncnames = userfuncnames
         if pygrametl._defaulttargetconnection is None:
             pygrametl._defaulttargetconnection = self
@@ -848,14 +910,12 @@ class SharedConnectionWrapperClient(object):
             setattr(self, funcname, self.__createuserfunc(funcname))
 
     def __createuserfunc(self, funcname):
-        def userfunction(*args):
-            self.__enqueue("_userfunc_" + funcname, *args)
-            # Wait for the userfunc to finish...
-            # OK after __enqueue
-            res = self.__fromserver[self.__clientid].get()
-            assert res == "USERFUNC"
-
-        return userfunction
+        return _SharedConnectionWrapperUserFunction(
+            self.__toserver,
+            self.__fromserver,
+            self.__freelines,
+            funcname,
+        )
 
     def copy(self):
         """Create a new copy of the SharedConnectionWrapper (same as new)"""
@@ -930,7 +990,11 @@ class SharedConnectionWrapperClient(object):
 
     def getunderlyingmodule(self):
         """Return a reference to the underlying connection's module."""
-        return self.__connectionmodule
+        if isinstance(self.__connectionmodulename, str):
+            self.__connectionmodulename = importlib.import_module(
+                self.__connectionmodulename
+            )
+        return self.__connectionmodulename
 
     def commit(self):
         """Commit the transaction."""
@@ -1150,34 +1214,13 @@ def getsharedsequencefactory(startvalue, intervallen=5000):
     # We use a Queue to ensure that intervals are only given to one deliverer
     values = Queue(10)
 
-    # A worker that fills the queue
-    def valuegenerator(nextval):
-        sys.excepthook = _getexcepthook()
-        while True:
-            values.put((nextval, nextval + intervallen))
-            nextval += intervallen
-
     # Start the worker process
-    p = Worker(target=valuegenerator, args=(startvalue,), name="Process for shared sequence generator", daemon=True)
+    p = Worker(
+        target=_sharedsequence_valuegenerator,
+        args=(values, intervallen, startvalue),
+        name="Process for shared sequence generator",
+        daemon=True,
+    )
     p.start()
 
-    # A generator that repeatedly gets an interval from the queue and returns
-    # all numbers in that interval before it gets a new interval and goes on
-    # ...
-    def valuedeliverer():
-        while True:
-            interval = values.get()
-            for i in range(*interval):
-                yield i
-
-    # A factory method for the object the end-consumer calls
-    def factory():
-        generator = valuedeliverer()  # get a unique generator
-        # The method called (i.e., the g) by the end-consumer
-
-        def getnextseqval(*ignored):
-            return next(generator)
-
-        return getnextseqval
-
-    return factory
+    return _SharedSequenceFactory(values)

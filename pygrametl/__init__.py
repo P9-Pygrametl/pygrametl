@@ -41,7 +41,7 @@ The package's modules are:
 # CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
+import psycopg
 from datetime import date, datetime
 from sys import modules, version_info
 from threading import Thread
@@ -96,11 +96,16 @@ __all__ = [
     "keepasis",
     "getdefaulttargetconnection",
     "ConnectionWrapper",
+    "PicklableConnectionWrapper",
     "_stringtypes",
 ]
 
 
 _alltables = []
+
+
+def _identity(value):
+    return value
 
 
 def project(atts, row, renaming={}):
@@ -516,6 +521,16 @@ def ymdhmsparser(ymdhmsstr):
     )
 
 
+class _RowValueReader(object):
+    def __init__(self, attribute, parsingfunction):
+        self.attribute = attribute
+        self.parsingfunction = parsingfunction
+
+    def __call__(self, targetconnection, row, namemapping={}):
+        atttouse = namemapping.get(self.attribute) or self.attribute
+        return self.parsingfunction(row[atttouse])
+
+
 def datereader(dateattribute, parsingfunction=ymdparser):
     """Return a function that converts a certain dict member to a datetime.date
 
@@ -530,11 +545,7 @@ def datereader(dateattribute, parsingfunction=ymdparser):
       to a datetime.date
     """
 
-    def readerfunction(targetconnection, row, namemapping={}):
-        atttouse = namemapping.get(dateattribute) or dateattribute
-        return parsingfunction(row[atttouse])  # a datetime.date
-
-    return readerfunction
+    return _RowValueReader(dateattribute, parsingfunction)
 
 
 def datetimereader(datetimeattribute, parsingfunction=ymdhmsparser):
@@ -551,11 +562,7 @@ def datetimereader(datetimeattribute, parsingfunction=ymdhmsparser):
       to a datetime.datetime
     """
 
-    def readerfunction(targetconnection, row, namemapping={}):
-        atttouse = namemapping.get(datetimeattribute) or datetimeattribute
-        return parsingfunction(row[atttouse])  # a datetime.datetime
-
-    return readerfunction
+    return _RowValueReader(datetimeattribute, parsingfunction)
 
 
 def datespan(
@@ -699,7 +706,7 @@ class ConnectionWrapper(object):
         """
         self.__connection = connection
         self.__cursor = connection.cursor()
-        self.nametranslator = lambda s: s
+        self.nametranslator = _identity
 
         self.__underlyingmodule = None  # will be updated next
         self.getunderlyingmodule()  # updates self.__underlyingmodule
@@ -999,16 +1006,51 @@ class ConnectionWrapper(object):
         else:
             return tuple([t[0] for t in self.__cursor.description])
 
-    def __getstate__(self):
-        # In case the ConnectionWrapper is pickled (to be sent to another
-        # process), we need to create a new cursor when it is unpickled.
-        res = self.__dict__.copy()
-        del res["_ConnectionWrapper__cursor"]  # a dirty trick, but...
-        return res
 
-    def __setstate__(self, dictdata):
-        self.__dict__.update(dictdata)
-        self.__cursor = self.__connection.cursor()
+class PicklableConnectionWrapper(ConnectionWrapper):
+    """A ConnectionWrapper that can be pickled and recreated later."""
+
+    def __init__(
+        self,
+        connection,
+        stmtcachesize=1000,
+        paramstyle=None,
+        copyintonew=False,
+    ):
+        self._connection = connection
+        self._stmtcachesize = stmtcachesize
+        self._paramstyle = paramstyle
+        self._copyintonew = copyintonew
+        super().__init__(
+            self._connect(),
+            stmtcachesize=stmtcachesize,
+            paramstyle=paramstyle,
+            copyintonew=copyintonew,
+        )
+
+    def _connect(self):
+        connection = psycopg.connect(**self._connection.info.get_parameters())
+        connection.autocommit = False
+        return connection
+
+    def __getstate__(self):
+        return {
+            "_stmtcachesize": self._stmtcachesize,
+            "_paramstyle": self._paramstyle,
+            "_copyintonew": self._copyintonew,
+        }
+
+    def __setstate__(self, state):
+        self._stmtcachesize = state["_stmtcachesize"]
+        self._paramstyle = state["_paramstyle"]
+        self._copyintonew = state["_copyintonew"]
+        ConnectionWrapper.__init__(
+            self,
+            self._connect(),
+            stmtcachesize=self._stmtcachesize,
+            paramstyle=self._paramstyle,
+            copyintonew=self._copyintonew,
+        )
 
 
 class BackgroundConnectionWrapper(object):
@@ -1035,7 +1077,7 @@ class BackgroundConnectionWrapper(object):
     def __init__(self, connection, stmtcachesize=1000, paramstyle=None):
         self.__connection = connection
         self.__cursor = connection.cursor()
-        self.nametranslator = lambda s: s
+        self.nametranslator = _identity
 
         self.__underlyingmodule = None  # will be updated next
         self.getunderlyingmodule()  # updates self.__underlyingmodule
