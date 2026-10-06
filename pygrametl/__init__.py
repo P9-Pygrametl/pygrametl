@@ -41,7 +41,7 @@ The package's modules are:
 # CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
+import psycopg
 from datetime import date, datetime
 from sys import modules, version_info
 from threading import Thread
@@ -96,6 +96,7 @@ __all__ = [
     "keepasis",
     "getdefaulttargetconnection",
     "ConnectionWrapper",
+    "PicklableConnectionWrapper",
     "_stringtypes",
 ]
 
@@ -1005,16 +1006,53 @@ class ConnectionWrapper(object):
         else:
             return tuple([t[0] for t in self.__cursor.description])
 
-    def __getstate__(self):
-        # In case the ConnectionWrapper is pickled (to be sent to another
-        # process), we need to create a new cursor when it is unpickled.
-        res = self.__dict__.copy()
-        del res["_ConnectionWrapper__cursor"]  # a dirty trick, but...
-        return res
 
-    def __setstate__(self, dictdata):
-        self.__dict__.update(dictdata)
-        self.__cursor = self.__connection.cursor()
+class PicklableConnectionWrapper(ConnectionWrapper):
+    """A ConnectionWrapper that can be pickled and recreated later."""
+
+    def __init__(
+        self,
+        connect_kwargs,
+        stmtcachesize=1000,
+        paramstyle=None,
+        copyintonew=False,
+    ):
+        self._connect_kwargs = dict(connect_kwargs)
+        self._stmtcachesize = stmtcachesize
+        self._paramstyle = paramstyle
+        self._copyintonew = copyintonew
+        super().__init__(
+            self._connect(),
+            stmtcachesize=stmtcachesize,
+            paramstyle=paramstyle,
+            copyintonew=copyintonew,
+        )
+
+    def _connect(self):
+        connection = psycopg.connect(**self._connect_kwargs)
+        connection.autocommit = False
+        return connection
+
+    def __getstate__(self):
+        return {
+            "_connect_kwargs": self._connect_kwargs,
+            "_stmtcachesize": self._stmtcachesize,
+            "_paramstyle": self._paramstyle,
+            "_copyintonew": self._copyintonew,
+        }
+
+    def __setstate__(self, state):
+        self._connect_kwargs = state["_connect_kwargs"]
+        self._stmtcachesize = state["_stmtcachesize"]
+        self._paramstyle = state["_paramstyle"]
+        self._copyintonew = state["_copyintonew"]
+        ConnectionWrapper.__init__(
+            self,
+            self._connect(),
+            stmtcachesize=self._stmtcachesize,
+            paramstyle=self._paramstyle,
+            copyintonew=self._copyintonew,
+        )
 
 
 class BackgroundConnectionWrapper(object):
