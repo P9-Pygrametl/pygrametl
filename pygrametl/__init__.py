@@ -103,6 +103,10 @@ __all__ = [
 _alltables = []
 
 
+def _identity(value):
+    return value
+
+
 def project(atts, row, renaming={}):
     """Create a new dictionary with a subset of the attributes.
 
@@ -516,6 +520,16 @@ def ymdhmsparser(ymdhmsstr):
     )
 
 
+class _RowValueReader(object):
+    def __init__(self, attribute, parsingfunction):
+        self.attribute = attribute
+        self.parsingfunction = parsingfunction
+
+    def __call__(self, targetconnection, row, namemapping={}):
+        atttouse = namemapping.get(self.attribute) or self.attribute
+        return self.parsingfunction(row[atttouse])
+
+
 def datereader(dateattribute, parsingfunction=ymdparser):
     """Return a function that converts a certain dict member to a datetime.date
 
@@ -530,11 +544,7 @@ def datereader(dateattribute, parsingfunction=ymdparser):
       to a datetime.date
     """
 
-    def readerfunction(targetconnection, row, namemapping={}):
-        atttouse = namemapping.get(dateattribute) or dateattribute
-        return parsingfunction(row[atttouse])  # a datetime.date
-
-    return readerfunction
+    return _RowValueReader(dateattribute, parsingfunction)
 
 
 def datetimereader(datetimeattribute, parsingfunction=ymdhmsparser):
@@ -551,11 +561,7 @@ def datetimereader(datetimeattribute, parsingfunction=ymdhmsparser):
       to a datetime.datetime
     """
 
-    def readerfunction(targetconnection, row, namemapping={}):
-        atttouse = namemapping.get(datetimeattribute) or datetimeattribute
-        return parsingfunction(row[atttouse])  # a datetime.datetime
-
-    return readerfunction
+    return _RowValueReader(datetimeattribute, parsingfunction)
 
 
 def datespan(
@@ -699,7 +705,7 @@ class ConnectionWrapper(object):
         """
         self.__connection = connection
         self.__cursor = connection.cursor()
-        self.nametranslator = lambda s: s
+        self.nametranslator = _identity
 
         self.__underlyingmodule = None  # will be updated next
         self.getunderlyingmodule()  # updates self.__underlyingmodule
@@ -1035,7 +1041,7 @@ class BackgroundConnectionWrapper(object):
     def __init__(self, connection, stmtcachesize=1000, paramstyle=None):
         self.__connection = connection
         self.__cursor = connection.cursor()
-        self.nametranslator = lambda s: s
+        self.nametranslator = _identity
 
         self.__underlyingmodule = None  # will be updated next
         self.getunderlyingmodule()  # updates self.__underlyingmodule

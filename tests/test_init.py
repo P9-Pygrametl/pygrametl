@@ -22,6 +22,7 @@
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+import sys
 import unittest
 from unittest.mock import patch
 from datetime import date, datetime
@@ -33,6 +34,7 @@ from tests import utilities
 
 
 class InitTest(unittest.TestCase):
+    print("GIL enabled:", sys._is_gil_enabled()) 
     def setUp(self):
         self.row = {
             "firstname": "John",
