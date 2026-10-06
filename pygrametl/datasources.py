@@ -40,6 +40,8 @@ if sys.platform.startswith("java"):
     from pygrametl.jythonmultiprocessing import Queue, Process
 else:
     from multiprocessing import Queue, Process
+    import freethreading  # <-- Add this import
+    from freethreading import Queue, Worker
     import sqlite3  # Only used by SQLTransformingSource
 
 try:
@@ -251,7 +253,7 @@ class ProcessSource(object):
         self.__source = source
         self.__batchsize = batchsize
         self.__queue = Queue(queuesize)
-        p = Process(target=self.__worker)
+        p = Worker(target=self.__worker)
         p.name = "Process for ProcessSource"
         p.start()
 

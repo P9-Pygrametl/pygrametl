@@ -40,7 +40,7 @@ try:
 except ImportError:
     from queue import Empty  # Python 3
 
-if sys.platform.startswith("java"):
+""" if sys.platform.startswith("java"):
     # Jython specific code in jythonmultiprocessing
     import pygrametl.jythonmultiprocessing as multiprocessing
 else:
@@ -55,7 +55,12 @@ else:
         multiprocessing.get_start_method(allow_none=True) != "fork"
         and os.environ.get("SPHINX_BUILD") != "1"
     ):
-        multiprocessing.set_start_method("fork")
+        multiprocessing.set_start_method("fork") """
+from multiprocessing import Queue, Process, Value
+import freethreading  # <-- Add this import
+from freethreading import Queue, Worker
+if hasattr(freethreading, 'disable_pickle_validation'):
+    freethreading.disable_pickle_validation()
 
 __all__ = [
     "splitpoint",
@@ -110,7 +115,7 @@ def _getexitfunction():
     # set up the terminator
     global _toterminator
     if _toterminator is None:
-        _toterminator = multiprocessing.Queue()
+        _toterminator = Queue()
 
         def terminatorfunction():
             pids = set([_masterpid])
@@ -125,7 +130,7 @@ def _getexitfunction():
                         os.kill(p, 9)
                     return
 
-        terminatorprocess = multiprocessing.Process(target=terminatorfunction)
+        terminatorprocess = Worker(name="terminator", target=terminatorfunction)
         terminatorprocess.daemon = True
         terminatorprocess.start()
 
@@ -259,9 +264,9 @@ def splitpoint(*arg, **kwargs):
 
             return sillywrapper
         # Else set up processes
-        input = multiprocessing.JoinableQueue(queuesize)
+        input = queuesize(queuesize)
         for n in range(instances):
-            p = multiprocessing.Process(
+            p = Worker(name="Process-%d for %s" % (n, func.__name__),
                 target=_splitprocess, args=(func, input, output, n)
             )
             p.name = "Process-%d for %s" % (n, func.__name__)
@@ -490,8 +495,8 @@ def createflow(*functions, **options):
     # A special case
     if not functions:
         return Flow(
-            [multiprocessing.JoinableQueue()],
-            [multiprocessing.Value("b", 0)],
+            [Queue()],
+            [Value("b", 0)],
             1,
         )
 
@@ -517,11 +522,12 @@ def createflow(*functions, **options):
     batchsize = ("batchsize" in options and options["batchsize"]) or 25
     if batchsize < 1:
         batchsize = 25
-    queues = [multiprocessing.JoinableQueue(queuesize) for f in resultfuncs]
-    queues.append(multiprocessing.JoinableQueue(queuesize))  # for the results
-    closed = [multiprocessing.Value("b", 0) for q in queues]  # in shared mem
+    queues = [Queue(queuesize) for f in resultfuncs]
+    queues.append(Queue(queuesize))  # for the results
+    closed = [Value("b", 0) for q in queues]  # in shared mem
     for i in range(len(resultfuncs)):
-        p = multiprocessing.Process(
+        p = Worker(
+            name="Process-%d for %s" % (i, resultfuncs[i].__name__),
             target=_flowprocess,
             args=(
                 resultfuncs[i],
@@ -599,9 +605,9 @@ class Decoupled(object):
         self.__batch = []
         self.__results = {}
         self.autowrap = autowrap
-        self.__toworker = multiprocessing.JoinableQueue(queuesize)
+        self.__toworker = Queue(queuesize)
         if returnvalues:
-            self.__fromworker = multiprocessing.JoinableQueue(queuesize)
+            self.__fromworker = Queue(queuesize)
         else:
             self.__fromworker = None
         self.__otherqueues = dict(
@@ -611,7 +617,7 @@ class Decoupled(object):
         self.__otherresults = {}
         self.__directupdates = directupdatepositions
 
-        self.__worker = multiprocessing.Process(target=self.__decoupledworker)
+        self.__worker = Worker(target=self.__decoupledworker)
         self.__worker.daemon = True
         self.__worker.name = "Process for %s object for %s" % (
             self.__class__.__name__,
@@ -1073,9 +1079,9 @@ def shareconnectionwrapper(targetconnection, maxclients=10, userfuncs=()):
     - userfuncs: a sequence of functions to add to the shared
       ConnectionWrapper. Default: ()
     """
-    toserver = multiprocessing.JoinableQueue(5000)
-    toclients = [multiprocessing.Queue() for i in range(maxclients)]
-    freelines = multiprocessing.Queue()
+    toserver = Queue(5000)
+    toclients = [Queue() for i in range(maxclients)]
+    freelines = Queue()
     for i in range(maxclients):
         freelines.put(i)
     serverCW = SharedConnectionWrapperServer(targetconnection, toserver, toclients)
@@ -1104,7 +1110,7 @@ def shareconnectionwrapper(targetconnection, maxclients=10, userfuncs=()):
                 raise ValueError("Illegal function name: " + func.__name__)
             setattr(serverCW, "_userfunc_" + func.__name__, func)
             userfuncnames.append(func.__name__)
-    serverprocess = multiprocessing.Process(target=serverCW.worker)
+    serverprocess = Worker(name="Process for shared connection wrapper", target=serverCW.worker)
     serverprocess.name = "Process for shared connection wrapper"
     serverprocess.daemon = True
     serverprocess.start()
@@ -1142,7 +1148,7 @@ def getsharedsequencefactory(startvalue, intervallen=5000):
         startvalue = 0
 
     # We use a Queue to ensure that intervals are only given to one deliverer
-    values = multiprocessing.Queue(10)
+    values = Queue(10)
 
     # A worker that fills the queue
     def valuegenerator(nextval):
@@ -1151,8 +1157,8 @@ def getsharedsequencefactory(startvalue, intervallen=5000):
             values.put((nextval, nextval + intervallen))
             nextval += intervallen
 
-    p = multiprocessing.Process(target=valuegenerator, args=(startvalue,))
-    p.daemon = True
+    # Start the worker process
+    p = Worker(target=valuegenerator, args=(startvalue,), name="Process for shared sequence generator", daemon=True)
     p.start()
 
     # A generator that repeatedly gets an interval from the queue and returns
