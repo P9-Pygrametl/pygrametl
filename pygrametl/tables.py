@@ -2526,6 +2526,7 @@ class _BaseBulkloadable(object):
         strconverter=pygrametl.getdbfriendlystr,
         encoding=None,
         dependson=(),
+        targetconnection=None,
     ):
         r"""Arguments:
 
@@ -2587,6 +2588,7 @@ class _BaseBulkloadable(object):
         self.nullsubst = nullsubst
         self.bulkloader = bulkloader
         self.tempdest = tempdest
+        self.targetconnection = targetconnection
 
         self.bulksize = bulksize
         self.usefilename = usefilename
@@ -2664,6 +2666,7 @@ class _BaseBulkloadable(object):
             self.rowsep,
             self.nullsubst,
             self.usefilename and self.__filename or self.tempdest,
+            self.targetconnection
         )
         self.tempdest.seek(0)
         self.tempdest.truncate(0)
@@ -2705,6 +2708,7 @@ class BulkFactTable(_BaseBulkloadable):
         strconverter=pygrametl.getdbfriendlystr,
         encoding=None,
         dependson=(),
+        targetconnection=None
     ):
         r"""Arguments:
 
@@ -2773,9 +2777,11 @@ class BulkFactTable(_BaseBulkloadable):
             strconverter=strconverter,
             encoding=encoding,
             dependson=dependson,
+            targetconnection=targetconnection
         )
 
         pygrametl._alltables.append(self)
+        self.targetconnection = targetconnection
 
 
 class BulkDimension(_BaseBulkloadable, CachedDimension):
