@@ -44,7 +44,6 @@ The package's modules are:
 import psycopg
 from datetime import date, datetime
 from sys import modules, version_info
-from threading import Thread
 
 from pygrametl.FIFODict import FIFODict
 
@@ -58,10 +57,9 @@ if version_info[0] == 2:
     # not avail. on Py3
 else:  # For Python 3
     _stringtypes = (str,)
-    from queue import Queue
-
     _DBBaseException = Exception
 
+from freethreading import Worker, Queue
 
 __version__ = "2.9"
 __all__ = [
@@ -1101,7 +1099,7 @@ class BackgroundConnectionWrapper(object):
         # Thread-stuff
         self.__cursor = connection.cursor()
         self.__queue = Queue(5000)
-        t = Thread(target=self.__worker)
+        t = Worker(target=self.__worker)
         t.daemon = True
         t.start()
 

@@ -41,32 +41,37 @@ try:
 except ImportError:
     from queue import Empty  # Python 3
 
-""" if sys.platform.startswith("java"):
+if sys.platform.startswith("java"):
     # Jython specific code in jythonmultiprocessing
-    import pygrametl.jythonmultiprocessing as multiprocessing
+    from pygrametl.jythonmultiprocessing import Queue, Process as Worker
 else:
     # Use (C)Python's std. lib.
-    import multiprocessing
+    from freethreading import Queue, Worker, get_backend, RLock
 
-    # This module assumes processes inherit state through fork. Thus, it
-    # requires that the platform supports the fork start method. The start
-    # method is not set to fork when Sphinx is building the documentation as it
-    # prevents Windows from doing so
-    if (
-        multiprocessing.get_start_method(allow_none=True) != "fork"
-        and os.environ.get("SPHINX_BUILD") != "1"
-    ):
-        multiprocessing.set_start_method("fork") """
-from multiprocessing import Queue, Process, Value
-import freethreading  # <-- Add this import
-from freethreading import Queue, Worker
-if hasattr(freethreading, 'disable_pickle_validation'):
-    freethreading.disable_pickle_validation()
-
-
+print(get_backend())  # DEBUG
 def _identity(value):
     return value
 
+class Value:
+    """Drop-in threading replacement for multiprocessing.Value."""
+    def __init__(self, typecode: str, value=0):
+        self.typecode = typecode  # Retained for API compatibility
+        self._value = value
+        self._lock = RLock()
+
+    def get_lock(self):
+        """Returns the underlying lock, matching multiprocessing.Value.get_lock()."""
+        return self._lock
+
+    @property
+    def value(self):
+        with self._lock:
+            return self._value
+
+    @value.setter
+    def value(self, val):
+        with self._lock:
+            self._value = val
 
 class _SharedConnectionWrapperUserFunction(object):
     def __init__(self, toserver, fromserver, freelines, funcname):

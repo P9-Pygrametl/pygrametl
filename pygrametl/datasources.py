@@ -37,10 +37,8 @@ from pygrametl import ConnectionWrapper
 
 if sys.platform.startswith("java"):
     # Jython specific code
-    from pygrametl.jythonmultiprocessing import Queue, Process
+    from pygrametl.jythonmultiprocessing import Queue, Process as Worker
 else:
-    from multiprocessing import Queue, Process
-    import freethreading
     from freethreading import Queue, Worker
     import sqlite3  # Only used by SQLTransformingSource
 
