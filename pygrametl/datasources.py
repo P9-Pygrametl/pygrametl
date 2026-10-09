@@ -40,7 +40,7 @@ if sys.platform.startswith("java"):
     from pygrametl.jythonmultiprocessing import Queue, Process
 else:
     from multiprocessing import Queue, Process
-    import freethreading  # <-- Add this import
+    import freethreading
     from freethreading import Queue, Worker
     import sqlite3  # Only used by SQLTransformingSource
 
@@ -148,34 +148,42 @@ class SQLSource(object):
         parameters=None,
         fetchsize=500,
     ):
-        """Arguments:
-
-        - connection: the PEP 249 connection to use. NOT a
-          ConnectionWrapper!
-        - query: the query that generates the result
-        - names: names of attributes in the result. If not set,
-          the names from the database are used. Default: ()
-        - initsql: SQL that is executed before the query. The result of this
-          initsql is not returned. Default: None.
-        - cursorarg: if not None, this argument is used as an argument when
-          the connection's cursor method is called. Default: None.
-        - parameters: if not None, this sequence or mapping of parameters
-          will be sent when the query is executed.
-        - fetchsize: The amount of rows to fetch into memory for each round trip to the source.
-          All rows will be fetched at once if fetchsize is set to 0 or less.
-        """
         self.connection = connection
-        if cursorarg is not None:
-            self.cursor = connection.cursor(cursorarg)
-        else:
-            self.cursor = connection.cursor()
-        if initsql:
-            self.cursor.execute(initsql)
         self.query = query
         self.names = names
-        self.executed = False
+        self.initsql = initsql
+        self.cursorarg = cursorarg
         self.parameters = parameters
         self.fetchsize = fetchsize
+        self.executed = False
+        self.cursor = None
+        self._ensure_cursor()
+
+    def _ensure_cursor(self):
+        if self.cursor is None:
+            if self.cursorarg is not None:
+                self.cursor = self.connection.cursor(self.cursorarg)
+            else:
+                self.cursor = self.connection.cursor()
+            if self.initsql and not self.executed:
+                self.cursor.execute(self.initsql)
+
+    def __getstate__(self):
+        return {
+            "connection": self.connection,
+            "query": self.query,
+            "names": self.names,
+            "initsql": self.initsql,
+            "cursorarg": self.cursorarg,
+            "parameters": self.parameters,
+            "fetchsize": self.fetchsize,
+            "executed": self.executed,
+        }
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self.cursor = None
+        self._ensure_cursor()
 
     def __iter__(self):
         try:
@@ -196,10 +204,6 @@ class SQLSource(object):
                 if not data:
                     break
                 if not names:
-                    # We do this to support cursor objects that only have
-                    # a meaningful .description after data has been fetched.
-                    # This is, for example, the case when using a named
-                    # psycopg2 cursor.
                     names = [t[0] for t in self.cursor.description]
                 if len(names) != len(data[0]):
                     raise ValueError(
@@ -209,8 +213,6 @@ class SQLSource(object):
                 for row in data:
                     yield dict(zip(names, row))
 
-                # It is not well defined in PEP 249 what fetchall will do if called twice
-                # Therefore it is safest to break the loop if fetchall is used
                 if self.fetchsize <= 0:
                     break
         finally:
@@ -240,22 +242,29 @@ class ProcessSource(object):
     """A class for iterating another source in a separate process"""
 
     def __init__(self, source, batchsize=500, queuesize=20):
-        """Arguments:
-
-        - source: the source to iterate
-        - batchsize: the number of rows passed from the worker process each
-          time it passes on a batch of rows. Must be positive. Default: 500
-        - queuesize: the maximum number of batches that can wait in a queue
-          between the processes. 0 means unlimited. Default: 20
-        """
         if not isinstance(batchsize, int) or batchsize < 1:
             raise ValueError("batchsize must be a positive integer")
         self.__source = source
         self.__batchsize = batchsize
+        self.__queuesize = queuesize
         self.__queue = Queue(queuesize)
         p = Worker(target=self.__worker)
         p.name = "Process for ProcessSource"
         p.start()
+
+    def __getstate__(self):
+        return {
+            "_source": self.__source,
+            "_batchsize": self.__batchsize,
+            "_queuesize": self.__queuesize,
+            "_queue": self.__queue,
+        }
+
+    def __setstate__(self, state):
+        self.__source = state["_source"]
+        self.__batchsize = state["_batchsize"]
+        self.__queuesize = state["_queuesize"]
+        self.__queue = state["_queue"]
 
     def __worker(self):
         batch = []
@@ -265,14 +274,11 @@ class ProcessSource(object):
                 if len(batch) == self.__batchsize:
                     self.__queue.put(batch)
                     batch = []
-            # We're done. Send the batch if it has any data and a signal
             if batch:
                 self.__queue.put(batch)
             self.__queue.put("STOP")
         except Exception:
-            # Jython 2.5.X does not support the as syntax required by Python 3
             e = sys.exc_info()[1]
-
             if batch:
                 self.__queue.put(batch)
             self.__queue.put("EXCEPTION")
@@ -286,10 +292,8 @@ class ProcessSource(object):
             elif data == "EXCEPTION":
                 exc = self.__queue.get()
                 raise exc
-            # else we got a list of rows from the other process
             for row in data:
                 yield row
-
 
 BackgroundSource = ProcessSource  # for compatability
 # The old thread-based BackgroundSource has been removed and
@@ -339,18 +343,27 @@ class MergeJoiningSource(object):
     """A class for merge-joining two sorted data sources"""
 
     def __init__(self, src1, key1, src2, key2):
-        """Arguments:
-
-        - src1: a data source
-        - key1: the attribute to use from src1
-        - src2: a data source
-        - key2: the attribute to use from src2
-        """
         self.__src1 = src1
         self.__key1 = key1
         self.__src2 = src2
         self.__key2 = key2
         self.__next = None
+
+    def __getstate__(self):
+        return {
+            "_src1": self.__src1,
+            "_key1": self.__key1,
+            "_src2": self.__src2,
+            "_key2": self.__key2,
+            "_next": self.__next,
+        }
+
+    def __setstate__(self, state):
+        self.__src1 = state["_src1"]
+        self.__key1 = state["_key1"]
+        self.__src2 = state["_src2"]
+        self.__key2 = state["_key2"]
+        self.__next = state["_next"]
 
     def __iter__(self):
         iter1 = self.__src1.__iter__()
@@ -362,9 +375,8 @@ class MergeJoiningSource(object):
         keyval2 = rows2[0][self.__key2]
 
         try:
-            while True:  # At one point there will be a StopIteration
+            while True:
                 if keyval1 == keyval2:
-                    # Output rows
                     for part in rows2:
                         resrow = row1.copy()
                         resrow.update(part)
@@ -374,11 +386,11 @@ class MergeJoiningSource(object):
                 elif keyval1 < keyval2:
                     row1 = next(iter1)
                     keyval1 = row1[self.__key1]
-                else:  # k1 > k2
+                else:
                     rows2 = self.__getnextrows(iter2)
                     keyval2 = rows2[0][self.__key2]
         except StopIteration:
-            return  # Needed in Python 3.7+ due to PEP 479
+            return
 
     def __getnextrows(self, iterval):
         res = []
@@ -396,7 +408,7 @@ class MergeJoiningSource(object):
                 else:
                     raise
             if keyval is None:
-                keyval = row[self.__key2]  # for the first row in this round
+                keyval = row[self.__key2]
             if row[self.__key2] == keyval:
                 res.append(row)
             else:
@@ -434,22 +446,24 @@ class TransformingSource(object):
     """A source that applies functions to the rows from another source"""
 
     def __init__(self, source, *transformations):
-        """Arguments:
-
-        - source: a data source
-        - *transformations: the transformations to apply. Must be callables
-          of the form func(row) where row is a dict. Will be applied in the
-          given order.
-        """
         self.__source = source
         self.__transformations = transformations
+
+    def __getstate__(self):
+        return {
+            "_source": self.__source,
+            "_transformations": self.__transformations,
+        }
+
+    def __setstate__(self, state):
+        self.__source = state["_source"]
+        self.__transformations = state["_transformations"]
 
     def __iter__(self):
         for row in self.__source:
             for func in self.__transformations:
                 func(row)
             yield row
-
 
 class SQLTransformingSource(object):
     """A source that transforms rows from another source by loading them into a

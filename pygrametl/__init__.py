@@ -733,7 +733,7 @@ class ConnectionWrapper(object):
         global _defaulttargetconnection
         if _defaulttargetconnection is None:
             _defaulttargetconnection = self
-
+    
     def execute(self, stmt, arguments=None, namemapping=None, translate=True):
         """Execute a statement.
 
@@ -996,9 +996,11 @@ class ConnectionWrapper(object):
         global _defaulttargetconnection
         _defaulttargetconnection = self
 
-    def cursor(self):
-        """Return a cursor object. Optional method."""
-        return self.__connection.cursor()
+    def cursor(self, *args, **kwargs):
+        """Creates and returns a cursor from the wrapped connection."""
+        if args or kwargs:
+            return self.__connection.cursor(*args, **kwargs)
+        return self.__cursor
 
     def resultnames(self):
         if self.__cursor.description is None:
