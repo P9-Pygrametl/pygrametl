@@ -91,6 +91,43 @@ __all__ = [
 ]
 
 
+class _QuoteList(object):
+    def __init__(self, quote):
+        self.quote = quote
+
+    def __call__(self, values):
+        return [self.quote(value) for value in values]
+
+
+def _tobytes_passthrough(data, encoding):
+    return data
+
+
+def _tobytes_encode(data, encoding):
+    return bytes(data, encoding)
+
+
+def _sum_hash_values(row):
+    return reduce((lambda x, y: x + y), map(hash, row.values()))
+
+
+def _sum_values(row):
+    return reduce((lambda x, y: x + y), row.values())
+
+
+class _TempFileState(object):
+    def __init__(self, filename):
+        self.name = filename
+        try:
+            self.file = open(filename, "r+b")
+        except OSError:
+            self.file = open(filename, "w+b")
+
+    def close(self):
+        self.file.close()
+
+
+
 def _quote(x):
     return x
 
@@ -194,7 +231,7 @@ class Dimension(object):
         self.defaultidvalue = defaultidvalue
         self.rowexpander = rowexpander
         self.quote = _quote
-        self.quotelist = lambda x: [self.quote(xn) for xn in x]
+        self.quotelist = _QuoteList(self.quote)
         pygrametl._alltables.append(self)
 
         # Now create the SQL that we will need...
@@ -2146,7 +2183,7 @@ class FactTable(object):
         pygrametl._alltables.append(self)
 
         self.quote = _quote
-        self.quotelist = lambda x: [self.quote(xn) for xn in x]
+        self.quotelist = _QuoteList(self.quote)
         # Create SQL
 
         # INSERT INTO name (key1, ..., keyn, meas1, ..., measn)
@@ -2496,6 +2533,8 @@ class AccumulatingSnapshotFactTable(FactTable):
         self.targetconnection.execute(updatesql, newrow, namemapping)
 
 
+# TODO: Rethink __getstate__ and __setstate__ for pickling. The current implementation
+#       is a bit of a hack and it would be better to have a more general solution
 class _BaseBulkloadable(object):
     """Common functionality for bulkloadable tables"""
 
@@ -2590,13 +2629,24 @@ class _BaseBulkloadable(object):
 
         if version_info[0] == 2:
             # Python 2: We ignore the specified encoding
-            self._tobytes = lambda data, encoding: data
+            self._tobytes = _tobytes_passthrough
         else:
             # Python 3: We make _tobytes use the specified encoding:
-            self._tobytes = lambda data, encoding: bytes(data, encoding)
+            self._tobytes = _tobytes_encode
 
         self.__count = 0
         self.__ready = True
+
+    def __getstate__(self):
+        state = self.__dict__.copy()
+        state.pop("_BaseBulkloadable__namedtempfile", None)
+        state.pop("tempdest", None)
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+        self.__namedtempfile = _TempFileState(self.__filename)
+        self.tempdest = self.__namedtempfile.file
 
     def __preparetempfile(self):
         self.__namedtempfile = tempfile.NamedTemporaryFile()
@@ -2764,7 +2814,6 @@ class BulkFactTable(_BaseBulkloadable):
 
         pygrametl._alltables.append(self)
 
-
 class BulkDimension(_BaseBulkloadable, CachedDimension):
     """A class for accessing a dimension table. Does caching and bulk loading.
 
@@ -2812,7 +2861,6 @@ class BulkDimension(_BaseBulkloadable, CachedDimension):
         strconverter=pygrametl.getdbfriendlystr,
         encoding=None,
         dependson=(),
-        targetconnection=None,
     ):
         r"""Arguments:
 
@@ -2911,7 +2959,6 @@ class BulkDimension(_BaseBulkloadable, CachedDimension):
             cachefullrows=cachefullrows,
             cacheoninsert=True,
             usefetchfirst=False,
-            targetconnection=targetconnection,
         )
 
         self.emptyrow = dict(zip(self.atts, len(self.atts) * (None,)))
@@ -3565,12 +3612,8 @@ class DimensionPartitioner(BasePartitioner):
             self.partitioner = partitioner
         else:
             # A partitioner that takes the hash of each attribute value in
-            # row and adds them all together:
-            # Reading from right to left: get the values, use hash() on each
-            # of them, and add all the hash values
-            self.partitioner = lambda row: reduce(
-                (lambda x, y: x + y), map(hash, row.values())
-            )
+            # row and adds them all together.
+            self.partitioner = _sum_hash_values
 
     def getpart(self, row, namemapping={}):
         """Return the part that should handle the given row"""
@@ -3663,7 +3706,7 @@ class FactTablePartitioner(BasePartitioner):
         if partitioner is not None:
             self.partitioner = partitioner
         else:
-            self.partitioner = lambda row: reduce((lambda x, y: x + y), row.values())
+            self.partitioner = _sum_values
         self.all = parts[0].all
         self.keyrefs = parts[0].keyrefs
         self.measures = parts[0].measures

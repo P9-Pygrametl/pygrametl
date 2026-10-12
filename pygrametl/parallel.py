@@ -28,6 +28,7 @@ Note that this module in many cases will give better results with Jython
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 import copy
+import importlib
 import os
 import sys
 from sys import version_info
@@ -41,20 +42,19 @@ except ImportError:
 
 if sys.platform.startswith("java"):
     # Jython specific code in jythonmultiprocessing
-    import pygrametl.jythonmultiprocessing as multiprocessing
+    from pygrametl.jythonmultiprocessing import Queue, Process as Worker, Value
 else:
+    if sys._is_gil_enabled():
+        from pygrametl.nogil import Value
+    else:
+        from multiprocessing import Value
     # Use (C)Python's std. lib.
-    import multiprocessing
+    from freethreading import Queue, Worker, get_backend
 
-    # This module assumes processes inherit state through fork. Thus, it
-    # requires that the platform supports the fork start method. The start
-    # method is not set to fork when Sphinx is building the documentation as it
-    # prevents Windows from doing so
-    if (
-        multiprocessing.get_start_method(allow_none=True) != "fork"
-        and os.environ.get("SPHINX_BUILD") != "1"
-    ):
-        multiprocessing.set_start_method("fork")
+print(get_backend())  # DEBUG
+
+def _identity(value):
+    return value
 
 __all__ = [
     "Decoupled",
@@ -109,7 +109,7 @@ def _getexitfunction():
     # set up the terminator
     global _toterminator
     if _toterminator is None:
-        _toterminator = multiprocessing.Queue()
+        _toterminator = Queue()
 
         def terminatorfunction():
             pids = {_masterpid}
@@ -124,7 +124,7 @@ def _getexitfunction():
                         os.kill(p, 9)
                     return
 
-        terminatorprocess = multiprocessing.Process(target=terminatorfunction)
+        terminatorprocess = Worker(name="terminator", target=terminatorfunction)
         terminatorprocess.daemon = True
         terminatorprocess.start()
 
@@ -155,7 +155,6 @@ def _getexcepthook():
         exit()
 
     return excepthook
-
 
 # Stuff for @splitpoint
 
@@ -257,9 +256,9 @@ def splitpoint(*arg, **kwargs):
 
             return sillywrapper
         # Else set up processes
-        input = multiprocessing.JoinableQueue(queuesize)
+        input = Queue(queuesize)
         for n in range(instances):
-            p = multiprocessing.Process(
+            p = Worker(
                 target=_splitprocess, args=(func, input, output, n)
             )
             p.name = "Process-%d for %s" % (n, func.__name__)
@@ -487,8 +486,8 @@ def createflow(*functions, **options):
     # A special case
     if not functions:
         return Flow(
-            [multiprocessing.JoinableQueue()],
-            [multiprocessing.Value("b", 0)],
+            [Queue()],
+            [Value("b", 0)],
             1,
         )
 
@@ -514,11 +513,11 @@ def createflow(*functions, **options):
     batchsize = ("batchsize" in options and options["batchsize"]) or 25
     if batchsize < 1:
         batchsize = 25
-    queues = [multiprocessing.JoinableQueue(queuesize) for f in resultfuncs]
-    queues.append(multiprocessing.JoinableQueue(queuesize))  # for the results
-    closed = [multiprocessing.Value("b", 0) for q in queues]  # in shared mem
+    queues = [Queue(queuesize) for f in resultfuncs]
+    queues.append(Queue(queuesize))  # for the results
+    closed = [Value("b", 0) for q in queues]  # in shared mem
     for i in range(len(resultfuncs)):
-        p = multiprocessing.Process(
+        p = Worker(
             target=_flowprocess,
             args=(
                 resultfuncs[i],
@@ -596,9 +595,9 @@ class Decoupled(object):
         self.__batch = []
         self.__results = {}
         self.autowrap = autowrap
-        self.__toworker = multiprocessing.JoinableQueue(queuesize)
+        self.__toworker = Queue(queuesize)
         if returnvalues:
-            self.__fromworker = multiprocessing.JoinableQueue(queuesize)
+            self.__fromworker = Queue(queuesize)
         else:
             self.__fromworker = None
         self.__otherqueues = {
@@ -608,7 +607,7 @@ class Decoupled(object):
         self.__otherresults = {}
         self.__directupdates = directupdatepositions
 
-        self.__worker = multiprocessing.Process(target=self.__decoupledworker)
+        self.__worker = Worker(target=self.__decoupledworker)
         self.__worker.daemon = True
         self.__worker.name = "Process for %s object for %s" % (
             self.__class__.__name__,
@@ -773,6 +772,28 @@ class Decoupled(object):
 
 
 # SharedConnectionWrapper stuff
+#TODO: REVISE
+class _SharedConnectionWrapperUserFunction(object):
+    def __init__(self, toserver, fromserver, freelines, funcname):
+        self.__clientid = None
+        self.__toserver = toserver
+        self.__fromserver = fromserver
+        self.__freelines = freelines
+        self.__funcname = funcname
+
+    def __del__(self):
+        if self.__clientid is not None:
+            self.__freelines.put(self.__clientid)
+
+    def __connecttoSCWserver(self):
+        self.__clientid = self.__freelines.get()
+
+    def __call__(self, *args):
+        if self.__clientid is None:
+            self.__connecttoSCWserver()
+        self.__toserver.put((self.__clientid, "_userfunc_" + self.__funcname, args))
+        res = self.__fromserver[self.__clientid].get()
+        assert res == "USERFUNC"
 
 
 class SharedConnectionWrapperClient(object):
@@ -793,12 +814,16 @@ class SharedConnectionWrapperClient(object):
         connectionmodule,
         userfuncnames=(),
     ):
-        self.nametranslator = lambda s: s
+        self.nametranslator = _identity
         self.__clientid = None
         self.__toserver = toserver
         self.__fromserver = fromserver
         self.__freelines = freelines
-        self.__connectionmodule = connectionmodule
+        # TODO: Revise
+        if hasattr(connectionmodule, "__name__"):
+            self.__connectionmodulename = connectionmodule.__name__
+        else:
+            self.__connectionmodulename = connectionmodule
         self.__userfuncnames = userfuncnames
         if pygrametl._defaulttargetconnection is None:
             pygrametl._defaulttargetconnection = self
@@ -838,14 +863,9 @@ class SharedConnectionWrapperClient(object):
             setattr(self, funcname, self.__createuserfunc(funcname))
 
     def __createuserfunc(self, funcname):
-        def userfunction(*args):
-            self.__enqueue("_userfunc_" + funcname, *args)
-            # Wait for the userfunc to finish...
-            # OK after __enqueue
-            res = self.__fromserver[self.__clientid].get()
-            assert res == "USERFUNC"
-
-        return userfunction
+            return _SharedConnectionWrapperUserFunction(
+                self.__toserver, self.__fromserver, self.__freelines, funcname
+            )
 
     def copy(self):
         """Create a new copy of the SharedConnectionWrapper (same as new)"""
@@ -919,8 +939,7 @@ class SharedConnectionWrapperClient(object):
         return -1
 
     def getunderlyingmodule(self):
-        """Return a reference to the underlying connection's module."""
-        return self.__connectionmodule
+        return self.__connectionmodulename
 
     def commit(self):
         """Commit the transaction."""
@@ -1069,9 +1088,9 @@ def shareconnectionwrapper(targetconnection, maxclients=10, userfuncs=()):
     - userfuncs: a sequence of functions to add to the shared
       ConnectionWrapper. Default: ()
     """
-    toserver = multiprocessing.JoinableQueue(5000)
-    toclients = [multiprocessing.Queue() for i in range(maxclients)]
-    freelines = multiprocessing.Queue()
+    toserver = Queue(5000)
+    toclients = [Queue() for i in range(maxclients)]
+    freelines = Queue()
     for i in range(maxclients):
         freelines.put(i)
     serverCW = SharedConnectionWrapperServer(targetconnection, toserver, toclients)
@@ -1100,7 +1119,7 @@ def shareconnectionwrapper(targetconnection, maxclients=10, userfuncs=()):
                 raise ValueError("Illegal function name: " + func.__name__)
             setattr(serverCW, "_userfunc_" + func.__name__, func)
             userfuncnames.append(func.__name__)
-    serverprocess = multiprocessing.Process(target=serverCW.worker)
+    serverprocess = Worker(target=serverCW.worker)
     serverprocess.name = "Process for shared connection wrapper"
     serverprocess.daemon = True
     serverprocess.start()
@@ -1112,6 +1131,34 @@ def shareconnectionwrapper(targetconnection, maxclients=10, userfuncs=()):
 
 
 # Shared sequences
+
+def _sharedsequence_valuegenerator(values, intervallen, nextval):
+    sys.excepthook = _getexcepthook()
+    while True:
+        values.put((nextval, nextval + intervallen))
+        nextval += intervallen
+
+class _SharedSequenceGetter(object):
+    def __init__(self, values):
+        self.__values = values
+        self.__current = None
+        self.__nextvalue = None
+
+    def __call__(self, *ignored):
+        if self.__current is None or self.__nextvalue >= self.__current[1]:
+            self.__current = self.__values.get()
+            self.__nextvalue = self.__current[0]
+        value = self.__nextvalue
+        self.__nextvalue += 1
+        return value
+
+
+class _SharedSequenceFactory(object):
+    def __init__(self, values):
+        self.__values = values
+
+    def __call__(self):
+        return _SharedSequenceGetter(self.__values)
 
 
 def getsharedsequencefactory(startvalue, intervallen=5000):
@@ -1138,36 +1185,15 @@ def getsharedsequencefactory(startvalue, intervallen=5000):
         startvalue = 0
 
     # We use a Queue to ensure that intervals are only given to one deliverer
-    values = multiprocessing.Queue(10)
+    values = Queue(10)
 
-    # A worker that fills the queue
-    def valuegenerator(nextval):
-        sys.excepthook = _getexcepthook()
-        while True:
-            values.put((nextval, nextval + intervallen))
-            nextval += intervallen
-
-    p = multiprocessing.Process(target=valuegenerator, args=(startvalue,))
-    p.daemon = True
+    # Start the worker process
+    p = Worker(
+        target=_sharedsequence_valuegenerator,
+        args=(values, intervallen, startvalue),
+        name="Process for shared sequence generator",
+        daemon=True,
+    )
     p.start()
 
-    # A generator that repeatedly gets an interval from the queue and returns
-    # all numbers in that interval before it gets a new interval and goes on
-    # ...
-    def valuedeliverer():
-        while True:
-            interval = values.get()
-            for i in range(*interval):
-                yield i
-
-    # A factory method for the object the end-consumer calls
-    def factory():
-        generator = valuedeliverer()  # get a unique generator
-        # The method called (i.e., the g) by the end-consumer
-
-        def getnextseqval(*ignored):
-            return next(generator)
-
-        return getnextseqval
-
-    return factory
+    return _SharedSequenceFactory(values)

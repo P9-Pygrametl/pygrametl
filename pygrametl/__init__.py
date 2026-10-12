@@ -42,11 +42,10 @@ The package's modules are:
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-from datetime import date, datetime
 from sys import modules, version_info
-from threading import Thread
-
 from pygrametl.FIFODict import FIFODict
+from freethreading import Worker
+from datetime import date, datetime
 
 if version_info[0] == 2:
     import types
@@ -57,10 +56,8 @@ if version_info[0] == 2:
     # not avail. on Py3
 else:  # For Python 3
     _stringtypes = (str,)
-    from queue import Queue
-
     _DBBaseException = Exception
-
+    from freethreading import Queue
 
 __version__ = "2.9"
 __all__ = [
@@ -100,6 +97,10 @@ __all__ = [
 
 
 _alltables = []
+
+
+def _identity(value):
+    return value
 
 
 def project(atts, row, renaming={}):
@@ -513,6 +514,14 @@ def ymdhmsparser(ymdhmsstr):
         int(year), int(month), int(day), int(hour), int(minute), int(second)
     )
 
+class _RowValueReader(object):
+    def __init__(self, attribute, parsingfunction):
+        self.attribute = attribute
+        self.parsingfunction = parsingfunction
+
+    def __call__(self, targetconnection, row, namemapping={}):
+        atttouse = namemapping.get(self.attribute) or self.attribute
+        return self.parsingfunction(row[atttouse])
 
 def datereader(dateattribute, parsingfunction=ymdparser):
     """Return a function that converts a certain dict member to a datetime.date
@@ -528,11 +537,7 @@ def datereader(dateattribute, parsingfunction=ymdparser):
       to a datetime.date
     """
 
-    def readerfunction(targetconnection, row, namemapping={}):
-        atttouse = namemapping.get(dateattribute) or dateattribute
-        return parsingfunction(row[atttouse])  # a datetime.date
-
-    return readerfunction
+    return _RowValueReader(dateattribute, parsingfunction)
 
 
 def datetimereader(datetimeattribute, parsingfunction=ymdhmsparser):
@@ -548,12 +553,7 @@ def datetimereader(datetimeattribute, parsingfunction=ymdhmsparser):
     - parsingfunction: the parsing function that converts the string
       to a datetime.datetime
     """
-
-    def readerfunction(targetconnection, row, namemapping={}):
-        atttouse = namemapping.get(datetimeattribute) or datetimeattribute
-        return parsingfunction(row[atttouse])  # a datetime.datetime
-
-    return readerfunction
+    return _RowValueReader(datetimeattribute, parsingfunction)
 
 
 def datespan(
@@ -696,7 +696,7 @@ class ConnectionWrapper(object):
         """
         self.__connection = connection
         self.__cursor = connection.cursor()
-        self.nametranslator = lambda s: s
+        self.nametranslator = _identity
 
         self.__underlyingmodule = None  # will be updated next
         self.getunderlyingmodule()  # updates self.__underlyingmodule
@@ -723,7 +723,7 @@ class ConnectionWrapper(object):
         global _defaulttargetconnection
         if _defaulttargetconnection is None:
             _defaulttargetconnection = self
-
+    
     def execute(self, stmt, arguments=None, namemapping=None, translate=True):
         """Execute a statement.
 
@@ -986,19 +986,21 @@ class ConnectionWrapper(object):
         global _defaulttargetconnection
         _defaulttargetconnection = self
 
-    def cursor(self):
-        """Return a cursor object. Optional method."""
-        return self.__connection.cursor()
+    def cursor(self, *args, **kwargs):
+        """Creates and returns a cursor from the wrapped connection."""
+        if args or kwargs:
+            return self.__connection.cursor(*args, **kwargs)
+        return self.__cursor
 
     def resultnames(self):
         if self.__cursor.description is None:
             return None
         else:
             return tuple([t[0] for t in self.__cursor.description])
-
+        
     def __getstate__(self):
-        # In case the ConnectionWrapper is pickled (to be sent to another
-        # process), we need to create a new cursor when it is unpickled.
+    # In case the ConnectionWrapper is pickled (to be sent to another
+    # process), we need to create a new cursor when it is unpickled.
         res = self.__dict__.copy()
         del res["_ConnectionWrapper__cursor"]  # a dirty trick, but...
         return res
@@ -1006,7 +1008,6 @@ class ConnectionWrapper(object):
     def __setstate__(self, dictdata):
         self.__dict__.update(dictdata)
         self.__cursor = self.__connection.cursor()
-
 
 class BackgroundConnectionWrapper(object):
     """Deprecated: This class is not maintained anymore! Use ConnectionWrapper
@@ -1032,7 +1033,7 @@ class BackgroundConnectionWrapper(object):
     def __init__(self, connection, stmtcachesize=1000, paramstyle=None):
         self.__connection = connection
         self.__cursor = connection.cursor()
-        self.nametranslator = lambda s: s
+        self.nametranslator = _identity
 
         self.__underlyingmodule = None  # will be updated next
         self.getunderlyingmodule()  # updates self.__underlyingmodule
@@ -1054,7 +1055,7 @@ class BackgroundConnectionWrapper(object):
         # Thread-stuff
         self.__cursor = connection.cursor()
         self.__queue = Queue(5000)
-        t = Thread(target=self.__worker)
+        t = Worker(target=self.__worker)
         t.daemon = True
         t.start()
 
