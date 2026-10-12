@@ -30,11 +30,10 @@ Note that this module in many cases will give better results with Jython
 import copy
 import importlib
 import os
-from sys import version_info
 import sys
+from sys import version_info
 
 import pygrametl
-
 
 try:
     from Queue import Empty  # Python 2
@@ -79,12 +78,12 @@ class _SharedConnectionWrapperUserFunction(object):
         assert res == "USERFUNC"
 
 __all__ = [
-    "splitpoint",
-    "endsplits",
-    "createflow",
     "Decoupled",
-    "shareconnectionwrapper",
+    "createflow",
+    "endsplits",
     "getsharedsequencefactory",
+    "shareconnectionwrapper",
+    "splitpoint",
 ]
 
 
@@ -134,7 +133,7 @@ def _getexitfunction():
         _toterminator = Queue()
 
         def terminatorfunction():
-            pids = set([_masterpid])
+            pids = {_masterpid}
             while True:
                 item = _toterminator.get()
                 if isinstance(item, int):
@@ -291,7 +290,7 @@ def splitpoint(*arg, **kwargs):
     # single element, namely the function to annotate, arg == (<function>,).
     # We then return decorator(function).
 
-    for kw in kwargs.keys():
+    for kw in kwargs:
         if kw not in ("instances", "output", "queuesize"):
             raise TypeError("'%s' is an invalid keyword argument for splitpoint" % kw)
 
@@ -300,7 +299,6 @@ def splitpoint(*arg, **kwargs):
     queuesize = kwargs.get("queuesize", 0)
 
     def decorator(func):
-        global _splitpointqueues
         if instances < 1:
             # A special case where there is no process so
             # we just call func directly
@@ -336,7 +334,6 @@ def splitpoint(*arg, **kwargs):
 
 def endsplits():
     """Wait for all splitpoints to finish"""
-    global _splitpointqueues
     for q in _splitpointqueues:
         q.join()
 
@@ -555,10 +552,10 @@ def createflow(*functions, **options):
         else:
             # Check the arguments
             if not hasattr(item, "__iter__"):
-                raise ValueError("An element is neither iterable nor callable")
+                raise TypeError("An element is neither iterable nor callable")
             for f in item:
                 if not callable(f):
-                    raise ValueError("An element in a sequence is not callable")
+                    raise TypeError("An element in a sequence is not callable")
             # We can - finally - create the function
             groupfunc = _buildgroupfunction(item)
             resultfuncs.append(groupfunc)
@@ -657,9 +654,9 @@ class Decoupled(object):
             self.__fromworker = Queue(queuesize)
         else:
             self.__fromworker = None
-        self.__otherqueues = dict(
-            [(dcpld.__instancenumber, dcpld.__fromworker) for dcpld in consumes]
-        )
+        self.__otherqueues = {
+            dcpld.__instancenumber: dcpld.__fromworker for dcpld in consumes
+        }
         # Will store dicts - see also __decoupledworker
         self.__otherresults = {}
         self.__directupdates = directupdatepositions
@@ -734,7 +731,7 @@ class Decoupled(object):
         if hasattr(self._obj, "_decoupled") and callable(self._obj._decoupled):
             self._obj._decoupled()
 
-        for creatorid, queue in self.__otherqueues.items():
+        for creatorid in self.__otherqueues:
             self.__otherresults[creatorid] = {}
 
         while True:
@@ -789,7 +786,6 @@ class Decoupled(object):
         self.__batch.append([None, funcname, args])
         if len(self.__batch) >= self.batchsize:
             self._endbatch()
-        return None
 
     def _getresult(self, future):
         if self.__fromworker is None:
@@ -959,17 +955,17 @@ class SharedConnectionWrapperClient(object):
 
     def fetchonetuple(self):
         """Return one result tuple."""
-        (ignoredrownames, row) = self.__fetchonehelper()
+        (_ignoredrownames, row) = self.__fetchonehelper()
         return row
 
     def fetchmanytuples(self, cnt):
         """Return cnt result tuples."""
-        (rownames, rows) = self.__getrows(cnt)
+        (_rownames, rows) = self.__getrows(cnt)
         return rows
 
     def fetchalltuples(self):
         """Return all result tuples"""
-        (rownames, rows) = self.__getrows(0)
+        (_rownames, rows) = self.__getrows(0)
         return rows
 
     def rowcount(self):
@@ -1008,7 +1004,7 @@ class SharedConnectionWrapperClient(object):
         raise NotImplementedError()
 
     def resultnames(self):
-        (rownames, nothing) = self.__getrows(None)
+        (rownames, _nothing) = self.__getrows(None)
         return rownames
 
 
