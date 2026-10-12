@@ -5,3 +5,5 @@ build
 dist
 docs/_build
 pygrametl.egg-info
+.vsc
+.vscode/
