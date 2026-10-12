@@ -28,6 +28,8 @@ provide dicts that map from attribute names to attribute values.
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 from csv import DictReader
+import os
+from pathlib import Path
 import sys
 
 import pygrametl
@@ -70,13 +72,165 @@ __all__ = [
 ]
 
 
-CSVSource = DictReader
+class CSVSource(object):
+    """A class for iterating a CSV file as dictionaries with pickling support."""
+
+    def __init__(
+        self,
+        f,
+        fieldnames=None,
+        restkey=None,
+        restval=None,
+        dialect="excel",
+        *args,
+        **kwds
+    ):
+        """Arguments:
+
+- f: An iterable object, file handle, or file path string/Path.
+- fieldnames: Passed on to csv.DictReader
+- restkey: Passed on to csv.DictReader
+- restval: Passed on to csv.DictReader
+- dialect: Passed on to csv.DictReader
+- *args: Passed on to csv.DictReader
+- **kwds: Passed on to csv.DictReader
+        """
+        self.f_arg = f
+        self.fieldnames_arg = fieldnames
+        self.restkey = restkey
+        self.restval = restval
+        self.dialect = dialect
+        self.args = args
+        self.kwds = kwds
+        self._init_reader()
+
+    def _init_reader(self, file_obj=None, fieldnames=None, offset=None):
+        if file_obj is not None:
+            self.file_obj = file_obj
+            self.should_close = False
+        elif isinstance(self.f_arg, (str, Path)):
+            self.file_obj = open(self.f_arg, "r")
+            self.should_close = True
+        else:
+            self.file_obj = self.f_arg
+            self.should_close = False
+
+        if offset is not None and hasattr(self.file_obj, "seek"):
+            try:
+                self.file_obj.seek(offset)
+            except (OSError, ValueError):
+                pass
+
+        use_fieldnames = fieldnames if fieldnames is not None else self.fieldnames_arg
+
+        self.reader = DictReader(
+            self.file_obj,
+            fieldnames=use_fieldnames,
+            restkey=self.restkey,
+            restval=self.restval,
+            dialect=self.dialect,
+            *self.args,
+            **self.kwds
+        )
+
+    @property
+    def fieldnames(self):
+        return self.reader.fieldnames
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return next(self.reader)
+
+    def next(self):  # For Python 2 / Jython compatibility
+        return self.__next__()
+
+    def __getstate__(self):
+        filename = getattr(self.file_obj, "name", None)
+        mode = getattr(self.file_obj, "mode", "r")
+        encoding = getattr(self.file_obj, "encoding", None)
+        offset = None
+
+        if hasattr(self.file_obj, "tell"):
+            try:
+                offset = self.file_obj.tell()
+            except (OSError, ValueError):
+                offset = None
+
+        string_content = None
+        if not (filename and isinstance(filename, (str, Path)) and os.path.exists(filename)):
+            if hasattr(self.file_obj, "getvalue"):
+                try:
+                    string_content = self.file_obj.getvalue()
+                except Exception:
+                    pass
+
+        parsed_fieldnames = getattr(self.reader, "_fieldnames", None)
+        if parsed_fieldnames is None:
+            fieldnames_to_save = self.fieldnames_arg
+        else:
+            fieldnames_to_save = parsed_fieldnames
+
+        return {
+            "f_arg": self.f_arg if isinstance(self.f_arg, (str, Path)) else None,
+            "filename": str(filename) if filename else None,
+            "mode": mode,
+            "encoding": encoding,
+            "offset": offset,
+            "string_content": string_content,
+            "fieldnames_arg": self.fieldnames_arg,
+            "fieldnames_to_save": fieldnames_to_save,
+            "restkey": self.restkey,
+            "restval": self.restval,
+            "dialect": self.dialect,
+            "args": self.args,
+            "kwds": self.kwds,
+        }
+
+    def __setstate__(self, state):
+        self.f_arg = state["f_arg"]
+        self.fieldnames_arg = state["fieldnames_arg"]
+        self.restkey = state["restkey"]
+        self.restval = state["restval"]
+        self.dialect = state["dialect"]
+        self.args = state.get("args", ())
+        self.kwds = state.get("kwds", {})
+
+        filename = state.get("filename")
+        mode = state.get("mode", "r")
+        encoding = state.get("encoding")
+        offset = state.get("offset")
+        string_content = state.get("string_content")
+        fieldnames_to_save = state.get("fieldnames_to_save")
+
+        file_obj = None
+        if filename and os.path.exists(filename):
+            open_kwargs = {}
+            if encoding:
+                open_kwargs["encoding"] = encoding
+            clean_mode = mode.replace("b", "") if isinstance(mode, str) else "r"
+            file_obj = open(filename, clean_mode, **open_kwargs)
+        elif string_content is not None:
+            import io
+            file_obj = io.StringIO(string_content)
+        elif self.f_arg and os.path.exists(self.f_arg):
+            file_obj = open(self.f_arg, "r")
+        else:
+            raise ValueError(
+                f"Cannot unpickle CSVSource: file source {filename or self.f_arg!r} is not accessible."
+            )
+
+        self._init_reader(
+            file_obj=file_obj,
+            fieldnames=fieldnames_to_save,
+            offset=offset,
+        )
 
 
-class TypedCSVSource(DictReader):
+class TypedCSVSource(CSVSource):
     """A class for iterating a CSV file and type cast the values."""
 
-    # Jython 2.7.4 cannot parse **kwds,
     def __init__(
         self,
         f,
@@ -87,22 +241,14 @@ class TypedCSVSource(DictReader):
         dialect="excel",
         *args,
         **kwds
-    ):  # fmt: skip
-        """Arguments:
-
-        - f: An iterable object such as as file. Passed on to
-          csv.DictReader
-        - casts: A dict mapping from attribute names to functions to apply
-          to these names, e.g., {'id':int, 'salary':float}
-        - fieldnames: Passed on to csv.DictReader
-        - restkey: Passed on to csv.DictReader
-        - restval: Passed on to csv.DictReader
-        - dialect: Passed on to csv.DictReader
-        - *args: Passed on to csv.DictReader
-        - **kwds: Passed on to csv.DictReader
-        """
-        # Jython 2.7.4 cannot parse **kwds,
-        DictReader.__init__(
+    ):
+        if type(casts) is not dict:
+            raise TypeError("The casts argument must be a dict")
+        for v in casts.values():
+            if not callable(v):
+                raise TypeError("The values in casts must be callable")
+        self._casts = casts
+        CSVSource.__init__(
             self,
             f,
             fieldnames=fieldnames,
@@ -111,26 +257,25 @@ class TypedCSVSource(DictReader):
             dialect=dialect,
             *args,
             **kwds
-        )  # fmt: skip
+        )
 
-        if type(casts) is not dict:
-            raise TypeError("The casts argument must be a dict")
-        for v in casts.values():
-            if not callable(v):
-                raise TypeError("The values in casts must be callable")
-        self._casts = casts
-
-    def __next__(self):  # For Python 3
-        row = DictReader.__next__(self)
+    def __next__(self):
+        row = CSVSource.__next__(self)
         for att, func in self._casts.items():
             row[att] = func(row[att])
         return row
 
-    def next(self):  # For Python 2
-        row = DictReader.next(self)
-        for att, func in self._casts.items():
-            row[att] = func(row[att])
-        return row
+    def next(self):
+        return self.__next__()
+
+    def __getstate__(self):
+        state = CSVSource.__getstate__(self)
+        state["_casts"] = self._casts
+        return state
+
+    def __setstate__(self, state):
+        self._casts = state["_casts"]
+        CSVSource.__setstate__(self, state)
 
 
 class SQLSource(object):
@@ -226,7 +371,7 @@ class PandasSource(object):
     def __init__(self, dataFrame):
         """Arguments:
 
-        - dataFrame: A Pandas DataFrame
+- dataFrame: A Pandas DataFrame
         """
         self._dataFrame = dataFrame
 
@@ -294,8 +439,6 @@ class ProcessSource(object):
                 yield row
 
 BackgroundSource = ProcessSource  # for compatability
-# The old thread-based BackgroundSource has been removed and
-# replaced by ProcessSource
 
 
 class HashJoiningSource(object):
@@ -304,11 +447,11 @@ class HashJoiningSource(object):
     def __init__(self, src1, key1, src2, key2):
         """Arguments:
 
-        - src1: the first source. This source is iterated row by row.
-        - key1: the attribute of the first source to use in the join
-        - src2: the second source. The rows of this source are all loaded
+- src1: the first source. This source is iterated row by row.
+- key1: the attribute of the first source to use in the join
+- src2: the second source. The rows of this source are all loaded
           into memory.
-        - key2: the attriubte of the second source to use in the join.
+- key2: the attriubte of the second source to use in the join.
         """
         self.__hash = {}
         self.__src1 = src1
@@ -420,8 +563,8 @@ class MappingSource(object):
     def __init__(self, source, callables):
         """Arguments:
 
-        - source: A data source
-        - callables: A dict mapping from attribute names to functions to
+- source: A data source
+- callables: A dict mapping from attribute names to functions to
           apply to these names, e.g. type casting {'id':int, 'salary':float}
         """
         if type(callables) is not dict:
@@ -463,6 +606,7 @@ class TransformingSource(object):
                 func(row)
             yield row
 
+
 class SQLTransformingSource(object):
     """A source that transforms rows from another source by loading them into a
     temporary table in an RDBMS and then retrieving them using an SQL query.
@@ -483,72 +627,36 @@ class SQLTransformingSource(object):
         usetruncate=True,
         targetconnection=None,
     ):
-        """Arguments:
-
-        - source: a data source that yields rows with the same schema, i.e.,
-          they contain the same columns and the columns' types do not change
-        - temptablename: a string with the name of the temporary table to use.
-          This table must use the same schema as the rows from source
-        - query: the query that is executed on temptablename in targetconnection
-          or an in-memory SQLite database to transforms the rows from source
-        - additionalcasts: a dict with additional casts from Python types to SQL
-          types in the form of strings that takes precedences over the default.
-          Default: None, i.e., only int, float, and str is mapped to simple SQL
-          types that should be supported by most RDBMSs
-        - batchsize: an int deciding how many insert operations should be done
-          in one batch. Default: 10000
-        - perbatch: a boolean deciding if the transformation should be applied
-          for each batch or for all rows in source.
-          Default: False, i.e., the transformation is applied once for all rows
-          in source
-        - columnnames: a sequence of column names to use for transformed rows.
-          Default: None, i.e., the column names from query are used
-        - usetruncate: a boolean deciding if TRUNCATE should be used instead of
-          DELETE FROM when emptying temptablename in targetconnection.
-          Default: True, i.e.,  TRUNCATE is used instead of DELETE FROM
-        - targetconnection: the PEP 249 connection to use, the ConnectionWrapper
-          to use, or None. If None, a new temporary in-memory SQLite database is
-          created
-        """
         self.__source = source
         self.__query = query
         self.__batchsize = batchsize
         self.__perbatch = perbatch
         self.__columnnames = columnnames
 
-        # Extensible mapping of Python types to SQL types
         self.__casts = {
             int: "INTEGER",
             float: "DOUBLE PRECISION",
-            str: "VARCHAR(4000)",  # Maximum size for Oracle 11g R2
+            str: "VARCHAR(4000)",
         }
 
         if additionalcasts:
             self.__casts |= additionalcasts
 
-        # Only close the connection if it is created by SQLTransformingSource
         if targetconnection is None:
             self.__close = True
             targetconnection = sqlite3.connect(":memory:")
-
-            # TRUNCATE is not supported in SQLite
             usetruncate = False
         else:
             self.__close = False
 
-        # Check if targetconnection is a ConnectioNWrapper without importing
-        # modules that require Jython when running under CPython and vice versa.
-        # A ConnectionWrapper is always used to support multiple paramstyles
         if "ConnectionWrapper" in type(targetconnection).__name__:
             self.__targetconnection = targetconnection
         else:
             self.__targetconnection = ConnectionWrapper(targetconnection)
 
-            # Ensure the implicitly created ConnectionWrapper is not default
             if self.__targetconnection == pygrametl.getdefaulttargetconnection():
                 pygrametl._defaulttargetconnection = None
 
-        # Create table SQL
         self.__batch = []
         row = next(source)
         self.__batch.append(row)
@@ -562,9 +670,6 @@ class SQLTransformingSource(object):
         self.__targetconnection.execute(createsql)
         self.__targetconnection.commit()
 
-        # Create insert SQL
-        # This gives "INSERT INTO tablename(att1, att2, att3, ...)
-        #             VALUES (%(att1)s, %(att2)s, %(att3)s, ...)"
         self.__insertsql = (
             "INSERT INTO "
             + temptablename
@@ -575,7 +680,6 @@ class SQLTransformingSource(object):
             + ")"
         )
 
-        # Create drop and truncate SQL
         self.__dropsql = "DROP TABLE " + temptablename
         if usetruncate:
             self.__deletefrom = "TRUNCATE TABLE " + temptablename
@@ -584,7 +688,6 @@ class SQLTransformingSource(object):
 
     def __iter__(self):
         for row in self.__source:
-            # Insert and maybe transform current batch
             if len(self.__batch) == self.__batchsize:
                 self.__insertnow()
                 if self.__perbatch:
@@ -592,15 +695,12 @@ class SQLTransformingSource(object):
                         yield transformed_row
                     self.__targetconnection.execute(self.__deletefrom)
 
-            # The first row is read and added in __init__
             self.__batch.append(row)
 
-        # Insert last batch and transform last or entire batch
         self.__insertnow()
         for transformed_row in self.__transform():
             yield transformed_row
 
-        # Cleanup
         self.__targetconnection.execute(self.__dropsql)
         self.__targetconnection.commit()
         if self.__close:
@@ -634,21 +734,6 @@ class CrossTabbingSource(object):
         nonevalue=0,
         sortrows=False,
     ):
-        """Arguments:
-
-        - source: the data source to pull data from
-        - rowvaluesatt: the name of the attribute that holds the values that
-          appear as rows in the result
-        - colvaluesatt: the name of the attribute that holds the values that
-          appear as columns in the result
-        - values: the name of the attribute that holds the values to aggregate
-        - aggregator: the aggregator to use (see pygrametl.aggregators). If not
-          given, pygrametl.aggregators.Sum is used to sum the values
-        - nonevalue: the value to return when there is no data to aggregate.
-          Default: 0
-        - sortrows: A boolean deciding if the rows should be sorted.
-          Default: False
-        """
         self.__source = source
         self.__rowvaluesatt = rowvaluesatt
         self.__colvaluesatt = colvaluesatt
@@ -665,14 +750,13 @@ class CrossTabbingSource(object):
         self.__allrows = set()
 
     def __iter__(self):
-        for data in self.__source:  # first we iterate over all source data ...
+        for data in self.__source:
             row = data[self.__rowvaluesatt]
             col = data[self.__colvaluesatt]
             self.__allrows.add(row)
             self.__allcolumns.add(col)
             self.__aggregator.process((row, col), data[self.__values])
 
-        # ... and then we build result rows
         for row in self.__sortrows and sorted(self.__allrows) or self.__allrows:
             res = {self.__rowvaluesatt: row}
             for col in self.__allcolumns:
@@ -684,14 +768,6 @@ class FilteringSource(object):
     """A source that applies a filter to another source"""
 
     def __init__(self, source, filter=bool):
-        """Arguments:
-
-        - source: the source to filter
-        - filter: a callable f(row). If the result is a True value,
-          the row is passed on. If not, the row is discarded.
-          Default: bool, i.e., Python's standard boolean conversion which
-          removes empty rows.
-        """
         self.__source = source
         self.__filter = filter
 
@@ -702,16 +778,9 @@ class FilteringSource(object):
 
 
 class UnionSource(object):
-    """A source to union other sources (possibly with different types of rows).
-    All rows are read from the 1st source before rows are read from the 2nd
-    source and so on (to interleave the rows, use a RoundRobinSource)
-    """
+    """A source to union other sources (possibly with different types of rows)."""
 
     def __init__(self, *sources):
-        """Arguments:
-
-        - *sources: The sources to union in the order they should be used.
-        """
         self.__sources = sources
 
     def __iter__(self):
@@ -724,65 +793,33 @@ class RoundRobinSource(object):
     """A source that reads sets of rows from sources in round robin-fashion"""
 
     def __init__(self, sources, batchsize=500):
-        """Arguments:
-
-        - sources: a sequence of data sources
-        - batchsize: the amount of rows to read from a data source before
-          going to the next data source. Must be positive (to empty a source
-          before going to the next, use UnionSource)
-        """
         self.__sources = [iter(src) for src in sources]
-        self.__sources.reverse()  # we iterate it from the back in __iter__
+        self.__sources.reverse()
         if not batchsize > 0:
             raise ValueError("batchsize must be positive")
         self.__batchsize = batchsize
 
     def __iter__(self):
         while self.__sources:
-            # iterate from back
             for i in range(len(self.__sources) - 1, -1, -1):
                 cursrc = self.__sources[i]
-                # now return up to __batchsize from cursrc
                 try:
                     for _ in range(self.__batchsize):
                         yield next(cursrc)
                 except StopIteration:
-                    # we're done with this source and can delete it since
-                    # we iterate the list as we do
                     del self.__sources[i]
         return
 
 
 class DynamicForEachSource(object):
-    """A source that for each given argument creates a new source that
-    will be iterated by this source.
-
-    For example, useful for directories where a CSVSource should be created
-    for each file.
-
-    The user must provide a function that when called with a single argument,
-    returns a new source to iterate. A DynamicForEachSource instance can be
-    given to several ProcessSource instances.
-    """
+    """A source that for each given argument creates a new source that will be iterated."""
 
     def __init__(self, seq, callee):
-        """Arguments:
-
-        - seq: a sequence with the elements for each of which a unique
-          source must be created. the elements are given (one by one) to
-          callee.
-        - callee: a function f(e) that must accept elements as those in the
-          seq argument. the function should return a source which then will
-          be iterated by this source. the function is called once for every
-          element in seq.
-        """
-        self.__queue = Queue()  # a multiprocessing.Queue
+        self.__queue = Queue()
         if not callable(callee):
             raise TypeError("callee must be callable")
         self.__callee = callee
         for e in seq:
-            # put them in a safe queue such that this object can be used from
-            # different fork'ed processes
             self.__queue.put(e)
 
     def __iter__(self):
@@ -808,20 +845,6 @@ class UnpivotingSource(object):
         valueatt="value",
         ignorenone=False,
     ):
-        """Arguments:
-
-        - source: the source to unpivot
-        - keyatts: a sequence of attributes to keep in each created row.
-          Default: ()
-        - unpivotatts: a sequence of attributes to unpivot. If None, all
-          attributes except those in keyatts are unpivoted. Default: None
-        - nameatt: the name of the attribute to store the original column
-          name in. Default: 'name'
-        - valueatt: the name of the attribute to store the original column
-          value in. Default: 'value'
-        - ignorenone: a boolean deciding if attributes with the value None
-          should be skipped. Default: False
-        """
         self.__source = source
 
         if type(keyatts) in pygrametl._stringtypes:

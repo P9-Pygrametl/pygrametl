@@ -43,35 +43,18 @@ except ImportError:
 
 if sys.platform.startswith("java"):
     # Jython specific code in jythonmultiprocessing
-    from pygrametl.jythonmultiprocessing import Queue, Process as Worker
+    from pygrametl.jythonmultiprocessing import Queue, Process as Worker, Value
 else:
+    if sys._is_gil_enabled:
+        from pygrametl.nogil import Value
+    else:
+        from multiprocessing import Value
     # Use (C)Python's std. lib.
-    from freethreading import Queue, Worker, get_backend, RLock
+    from freethreading import Queue, Worker, get_backend
 
 print(get_backend())  # DEBUG
 def _identity(value):
     return value
-
-class Value:
-    """Drop-in threading replacement for multiprocessing.Value."""
-    def __init__(self, typecode: str, value=0):
-        self.typecode = typecode  # Retained for API compatibility
-        self._value = value
-        self._lock = RLock()
-
-    def get_lock(self):
-        """Returns the underlying lock, matching multiprocessing.Value.get_lock()."""
-        return self._lock
-
-    @property
-    def value(self):
-        with self._lock:
-            return self._value
-
-    @value.setter
-    def value(self, val):
-        with self._lock:
-            self._value = val
 
 class _SharedConnectionWrapperUserFunction(object):
     def __init__(self, toserver, fromserver, freelines, funcname):

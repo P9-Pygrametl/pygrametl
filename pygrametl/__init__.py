@@ -41,12 +41,10 @@ The package's modules are:
 # CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY,
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-import psycopg
-from datetime import date, datetime
+
 from sys import modules, version_info
-
 from pygrametl.FIFODict import FIFODict
-
+from freethreading import Worker
 
 if version_info[0] == 2:
     import types
@@ -58,8 +56,7 @@ if version_info[0] == 2:
 else:  # For Python 3
     _stringtypes = (str,)
     _DBBaseException = Exception
-
-from freethreading import Worker, Queue
+    from freethreading import Queue
 
 __version__ = "2.9"
 __all__ = [
@@ -1005,53 +1002,6 @@ class ConnectionWrapper(object):
             return None
         else:
             return tuple([t[0] for t in self.__cursor.description])
-
-
-class PicklableConnectionWrapper(ConnectionWrapper):
-    """A ConnectionWrapper that can be pickled and recreated later."""
-
-    def __init__(
-        self,
-        connection,
-        stmtcachesize=1000,
-        paramstyle=None,
-        copyintonew=False,
-    ):
-        self._connection = connection
-        self._stmtcachesize = stmtcachesize
-        self._paramstyle = paramstyle
-        self._copyintonew = copyintonew
-        super().__init__(
-            self._connect(),
-            stmtcachesize=stmtcachesize,
-            paramstyle=paramstyle,
-            copyintonew=copyintonew,
-        )
-
-    def _connect(self):
-        connection = psycopg.connect(**self._connection.info.get_parameters())
-        connection.autocommit = False
-        return connection
-
-    def __getstate__(self):
-        return {
-            "_stmtcachesize": self._stmtcachesize,
-            "_paramstyle": self._paramstyle,
-            "_copyintonew": self._copyintonew,
-        }
-
-    def __setstate__(self, state):
-        self._stmtcachesize = state["_stmtcachesize"]
-        self._paramstyle = state["_paramstyle"]
-        self._copyintonew = state["_copyintonew"]
-        ConnectionWrapper.__init__(
-            self,
-            self._connect(),
-            stmtcachesize=self._stmtcachesize,
-            paramstyle=self._paramstyle,
-            copyintonew=self._copyintonew,
-        )
-
 
 class BackgroundConnectionWrapper(object):
     """Deprecated: This class is not maintained anymore! Use ConnectionWrapper
