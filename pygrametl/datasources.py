@@ -72,27 +72,16 @@ __all__ = [
 
 
 class CSVSource(object):
-    """A class for iterating a CSV file as dictionaries with pickling support."""
+    """A class for iterating a CSV file as dictionaries with pickling
+    support."""
 
-    def __init__(
-        self,
-        f,
-        fieldnames=None,
-        restkey=None,
-        restval=None,
-        dialect="excel",
-        *args,
-        **kwds
-    ):
+    def __init__(self, f, fieldnames=None, restkey=None, restval=None,
+                 dialect="excel", *args, **kwds):
         """Arguments:
 
 - f: An iterable object, file handle, or file path string/Path.
-- fieldnames: Passed on to csv.DictReader
-- restkey: Passed on to csv.DictReader
-- restval: Passed on to csv.DictReader
-- dialect: Passed on to csv.DictReader
-- *args: Passed on to csv.DictReader
-- **kwds: Passed on to csv.DictReader
+- fieldnames, restkey, restval, dialect, *args, **kwds:
+          Passed on to csv.DictReader
         """
         self.f_arg = f
         self.fieldnames_arg = fieldnames
@@ -104,15 +93,9 @@ class CSVSource(object):
         self._init_reader()
 
     def _init_reader(self, file_obj=None, fieldnames=None, offset=None):
-        if file_obj is not None:
-            self.file_obj = file_obj
-            self.should_close = False
-        elif isinstance(self.f_arg, (str, Path)):
-            self.file_obj = open(self.f_arg, "r")
-            self.should_close = True
-        else:
-            self.file_obj = self.f_arg
-            self.should_close = False
+        if file_obj is None and isinstance(self.f_arg, (str, Path)):
+            file_obj = open(self.f_arg, "r")
+        self.file_obj = file_obj if file_obj is not None else self.f_arg
 
         if offset is not None and hasattr(self.file_obj, "seek"):
             try:
@@ -120,11 +103,9 @@ class CSVSource(object):
             except (OSError, ValueError):
                 pass
 
-        use_fieldnames = fieldnames if fieldnames is not None else self.fieldnames_arg
-
         self.reader = DictReader(
             self.file_obj,
-            fieldnames=use_fieldnames,
+            fieldnames=fieldnames or self.fieldnames_arg,
             restkey=self.restkey,
             restval=self.restval,
             dialect=self.dialect,
@@ -142,89 +123,43 @@ class CSVSource(object):
     def __next__(self):
         return next(self.reader)
 
-    def next(self):  # For Python 2 / Jython compatibility
-        return self.__next__()
+    next = __next__  # Python 2 / Jython compatibility
 
     def __getstate__(self):
-        filename = getattr(self.file_obj, "name", None)
-        mode = getattr(self.file_obj, "mode", "r")
-        encoding = getattr(self.file_obj, "encoding", None)
-        offset = None
+        state = self.__dict__.copy()
+        del state["file_obj"], state["reader"]
 
-        if hasattr(self.file_obj, "tell"):
-            try:
-                offset = self.file_obj.tell()
-            except (OSError, ValueError):
-                offset = None
+        # f_arg may be an unpicklable file handle
+        if not isinstance(state["f_arg"], (str, Path)):
+            state["f_arg"] = None
 
-        string_content = None
-        if not (filename and isinstance(filename, (str, Path)) and os.path.exists(filename)):
-            if hasattr(self.file_obj, "getvalue"):
-                try:
-                    string_content = self.file_obj.getvalue()
-                except Exception:
-                    pass
-
-        parsed_fieldnames = getattr(self.reader, "_fieldnames", None)
-        if parsed_fieldnames is None:
-            fieldnames_to_save = self.fieldnames_arg
-        else:
-            fieldnames_to_save = parsed_fieldnames
-
-        return {
-            "f_arg": self.f_arg if isinstance(self.f_arg, (str, Path)) else None,
-            "filename": str(filename) if filename else None,
-            "mode": mode,
-            "encoding": encoding,
-            "offset": offset,
-            "string_content": string_content,
-            "fieldnames_arg": self.fieldnames_arg,
-            "fieldnames_to_save": fieldnames_to_save,
-            "restkey": self.restkey,
-            "restval": self.restval,
-            "dialect": self.dialect,
-            "args": self.args,
-            "kwds": self.kwds,
-        }
+        f = self.file_obj
+        state["filename"] = getattr(f, "name", None) or (
+            str(self.f_arg) if isinstance(self.f_arg, (str, Path)) else None
+        )
+        state["encoding"] = getattr(f, "encoding", None)
+        state["offset"] = f.tell() if hasattr(f, "tell") else None
+        state["content"] = f.getvalue() if hasattr(f, "getvalue") else None
+        state["saved_fieldnames"] = (
+            getattr(self.reader, "_fieldnames", None) or self.fieldnames_arg
+        )
+        return state
 
     def __setstate__(self, state):
-        self.f_arg = state["f_arg"]
-        self.fieldnames_arg = state["fieldnames_arg"]
-        self.restkey = state["restkey"]
-        self.restval = state["restval"]
-        self.dialect = state["dialect"]
-        self.args = state.get("args", ())
-        self.kwds = state.get("kwds", {})
+        filename = state.pop("filename")
+        encoding = state.pop("encoding")
+        offset = state.pop("offset")
+        fieldnames = state.pop("saved_fieldnames")
+        self.__dict__.update(state)
 
-        filename = state.get("filename")
-        mode = state.get("mode", "r")
-        encoding = state.get("encoding")
-        offset = state.get("offset")
-        string_content = state.get("string_content")
-        fieldnames_to_save = state.get("fieldnames_to_save")
-
-        file_obj = None
-        if filename and os.path.exists(filename):
-            open_kwargs = {}
-            if encoding:
-                open_kwargs["encoding"] = encoding
-            clean_mode = mode.replace("b", "") if isinstance(mode, str) else "r"
-            file_obj = open(filename, clean_mode, **open_kwargs)
-        elif string_content is not None:
-            import io
-            file_obj = io.StringIO(string_content)
-        elif self.f_arg and os.path.exists(self.f_arg):
-            file_obj = open(self.f_arg, "r")
-        else:
+        if not (filename and os.path.exists(filename)):
             raise ValueError(
-                f"Cannot unpickle CSVSource: file source {filename or self.f_arg!r} is not accessible."
+                "Cannot unpickle CSVSource: file %r is not accessible"
+                % filename
             )
 
-        self._init_reader(
-            file_obj=file_obj,
-            fieldnames=fieldnames_to_save,
-            offset=offset,
-        )
+        file_obj = open(filename, "r", encoding=encoding)
+        self._init_reader(file_obj, fieldnames, offset)
 
 
 class TypedCSVSource(CSVSource):
@@ -290,42 +225,34 @@ class SQLSource(object):
         parameters=None,
         fetchsize=500,
     ):
+        """Arguments:
+
+        - connection: the PEP 249 connection to use. NOT a
+          ConnectionWrapper!
+        - query: the query that generates the result
+        - names: names of attributes in the result. If not set,
+          the names from the database are used. Default: ()
+        - initsql: SQL that is executed before the query. The result of this
+          initsql is not returned. Default: None.
+        - cursorarg: if not None, this argument is used as an argument when
+          the connection's cursor method is called. Default: None.
+        - parameters: if not None, this sequence or mapping of parameters
+          will be sent when the query is executed.
+        - fetchsize: The amount of rows to fetch into memory for each round trip to the source.
+          All rows will be fetched at once if fetchsize is set to 0 or less.
+        """
         self.connection = connection
+        if cursorarg is not None:
+            self.cursor = connection.cursor(cursorarg)
+        else:
+            self.cursor = connection.cursor()
+        if initsql:
+            self.cursor.execute(initsql)
         self.query = query
         self.names = names
-        self.initsql = initsql
-        self.cursorarg = cursorarg
+        self.executed = False
         self.parameters = parameters
         self.fetchsize = fetchsize
-        self.executed = False
-        self.cursor = None
-        self._ensure_cursor()
-
-    def _ensure_cursor(self):
-        if self.cursor is None:
-            if self.cursorarg is not None:
-                self.cursor = self.connection.cursor(self.cursorarg)
-            else:
-                self.cursor = self.connection.cursor()
-            if self.initsql and not self.executed:
-                self.cursor.execute(self.initsql)
-
-    def __getstate__(self):
-        return {
-            "connection": self.connection,
-            "query": self.query,
-            "names": self.names,
-            "initsql": self.initsql,
-            "cursorarg": self.cursorarg,
-            "parameters": self.parameters,
-            "fetchsize": self.fetchsize,
-            "executed": self.executed,
-        }
-
-    def __setstate__(self, state):
-        self.__dict__.update(state)
-        self.cursor = None
-        self._ensure_cursor()
 
     def __iter__(self):
         try:
@@ -346,6 +273,10 @@ class SQLSource(object):
                 if not data:
                     break
                 if not names:
+                    # We do this to support cursor objects that only have
+                    # a meaningful .description after data has been fetched.
+                    # This is, for example, the case when using a named
+                    # psycopg2 cursor.
                     names = [t[0] for t in self.cursor.description]
                 if len(names) != len(data[0]):
                     raise ValueError(
@@ -355,6 +286,8 @@ class SQLSource(object):
                 for row in data:
                     yield dict(zip(names, row))
 
+                # It is not well defined in PEP 249 what fetchall will do if called twice
+                # Therefore it is safest to break the loop if fetchall is used
                 if self.fetchsize <= 0:
                     break
         finally:
@@ -446,11 +379,11 @@ class HashJoiningSource(object):
     def __init__(self, src1, key1, src2, key2):
         """Arguments:
 
-- src1: the first source. This source is iterated row by row.
-- key1: the attribute of the first source to use in the join
-- src2: the second source. The rows of this source are all loaded
+        - src1: the first source. This source is iterated row by row.
+        - key1: the attribute of the first source to use in the join
+        - src2: the second source. The rows of this source are all loaded
           into memory.
-- key2: the attriubte of the second source to use in the join.
+        - key2: the attriubte of the second source to use in the join.
         """
         self.__hash = {}
         self.__src1 = src1
@@ -483,27 +416,18 @@ class MergeJoiningSource(object):
     """A class for merge-joining two sorted data sources"""
 
     def __init__(self, src1, key1, src2, key2):
+        """Arguments:
+
+        - src1: a data source
+        - key1: the attribute to use from src1
+        - src2: a data source
+        - key2: the attribute to use from src2
+        """
         self.__src1 = src1
         self.__key1 = key1
         self.__src2 = src2
         self.__key2 = key2
         self.__next = None
-
-    def __getstate__(self):
-        return {
-            "_src1": self.__src1,
-            "_key1": self.__key1,
-            "_src2": self.__src2,
-            "_key2": self.__key2,
-            "_next": self.__next,
-        }
-
-    def __setstate__(self, state):
-        self.__src1 = state["_src1"]
-        self.__key1 = state["_key1"]
-        self.__src2 = state["_src2"]
-        self.__key2 = state["_key2"]
-        self.__next = state["_next"]
 
     def __iter__(self):
         iter1 = self.__src1.__iter__()
@@ -515,8 +439,9 @@ class MergeJoiningSource(object):
         keyval2 = rows2[0][self.__key2]
 
         try:
-            while True:
+            while True:  # At one point there will be a StopIteration
                 if keyval1 == keyval2:
+                    # Output rows
                     for part in rows2:
                         resrow = row1.copy()
                         resrow.update(part)
@@ -526,11 +451,11 @@ class MergeJoiningSource(object):
                 elif keyval1 < keyval2:
                     row1 = next(iter1)
                     keyval1 = row1[self.__key1]
-                else:
+                else:  # k1 > k2
                     rows2 = self.__getnextrows(iter2)
                     keyval2 = rows2[0][self.__key2]
         except StopIteration:
-            return
+            return  # Needed in Python 3.7+ due to PEP 479
 
     def __getnextrows(self, iterval):
         res = []
@@ -548,13 +473,12 @@ class MergeJoiningSource(object):
                 else:
                     raise
             if keyval is None:
-                keyval = row[self.__key2]
+                keyval = row[self.__key2]  # for the first row in this round
             if row[self.__key2] == keyval:
                 res.append(row)
             else:
                 self.__next = row
                 return res
-
 
 class MappingSource(object):
     """A class for iterating a source and applying a function to each column."""
@@ -586,18 +510,15 @@ class TransformingSource(object):
     """A source that applies functions to the rows from another source"""
 
     def __init__(self, source, *transformations):
+        """Arguments:
+
+        - source: a data source
+        - *transformations: the transformations to apply. Must be callables
+          of the form func(row) where row is a dict. Will be applied in the
+          given order.
+        """
         self.__source = source
         self.__transformations = transformations
-
-    def __getstate__(self):
-        return {
-            "_source": self.__source,
-            "_transformations": self.__transformations,
-        }
-
-    def __setstate__(self, state):
-        self.__source = state["_source"]
-        self.__transformations = state["_transformations"]
 
     def __iter__(self):
         for row in self.__source:

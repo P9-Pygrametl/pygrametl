@@ -514,7 +514,6 @@ def ymdhmsparser(ymdhmsstr):
         int(year), int(month), int(day), int(hour), int(minute), int(second)
     )
 
-
 class _RowValueReader(object):
     def __init__(self, attribute, parsingfunction):
         self.attribute = attribute
@@ -523,7 +522,6 @@ class _RowValueReader(object):
     def __call__(self, targetconnection, row, namemapping={}):
         atttouse = namemapping.get(self.attribute) or self.attribute
         return self.parsingfunction(row[atttouse])
-
 
 def datereader(dateattribute, parsingfunction=ymdparser):
     """Return a function that converts a certain dict member to a datetime.date
@@ -555,7 +553,6 @@ def datetimereader(datetimeattribute, parsingfunction=ymdhmsparser):
     - parsingfunction: the parsing function that converts the string
       to a datetime.datetime
     """
-
     return _RowValueReader(datetimeattribute, parsingfunction)
 
 
@@ -1000,6 +997,17 @@ class ConnectionWrapper(object):
             return None
         else:
             return tuple([t[0] for t in self.__cursor.description])
+        
+    def __getstate__(self):
+    # In case the ConnectionWrapper is pickled (to be sent to another
+    # process), we need to create a new cursor when it is unpickled.
+        res = self.__dict__.copy()
+        del res["_ConnectionWrapper__cursor"]  # a dirty trick, but...
+        return res
+
+    def __setstate__(self, dictdata):
+        self.__dict__.update(dictdata)
+        self.__cursor = self.__connection.cursor()
 
 class BackgroundConnectionWrapper(object):
     """Deprecated: This class is not maintained anymore! Use ConnectionWrapper

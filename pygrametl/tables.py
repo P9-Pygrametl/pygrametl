@@ -99,18 +99,6 @@ class _QuoteList(object):
         return [self.quote(value) for value in values]
 
 
-class _RowToValue(object):
-    def __init__(self, allattributes):
-        self.allattributes = allattributes
-
-    def __call__(self, row):
-        return _row_to_multivalue(self.allattributes, row)
-
-
-def _row_to_multivalue(allattributes, row):
-    return "(" + ",".join(map(lambda c: pygrametl.getsqlfriendlystr(row[c]), allattributes)) + ")"
-
-
 def _tobytes_passthrough(data, encoding):
     return data
 
@@ -2545,6 +2533,8 @@ class AccumulatingSnapshotFactTable(FactTable):
         self.targetconnection.execute(updatesql, newrow, namemapping)
 
 
+# TODO: Rethink __getstate__ and __setstate__ for pickling. The current implementation
+#       is a bit of a hack and it would be better to have a more general solution
 class _BaseBulkloadable(object):
     """Common functionality for bulkloadable tables"""
 

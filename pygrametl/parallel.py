@@ -44,7 +44,7 @@ if sys.platform.startswith("java"):
     # Jython specific code in jythonmultiprocessing
     from pygrametl.jythonmultiprocessing import Queue, Process as Worker, Value
 else:
-    if sys._is_gil_enabled:
+    if sys._is_gil_enabled():
         from pygrametl.nogil import Value
     else:
         from multiprocessing import Value
@@ -52,30 +52,9 @@ else:
     from freethreading import Queue, Worker, get_backend
 
 print(get_backend())  # DEBUG
+
 def _identity(value):
     return value
-
-class _SharedConnectionWrapperUserFunction(object):
-    def __init__(self, toserver, fromserver, freelines, funcname):
-        self.__clientid = None
-        self.__toserver = toserver
-        self.__fromserver = fromserver
-        self.__freelines = freelines
-        self.__funcname = funcname
-
-    def __del__(self):
-        if self.__clientid is not None:
-            self.__freelines.put(self.__clientid)
-
-    def __connecttoSCWserver(self):
-        self.__clientid = self.__freelines.get()
-
-    def __call__(self, *args):
-        if self.__clientid is None:
-            self.__connecttoSCWserver()
-        self.__toserver.put((self.__clientid, "_userfunc_" + self.__funcname, args))
-        res = self.__fromserver[self.__clientid].get()
-        assert res == "USERFUNC"
 
 __all__ = [
     "Decoupled",
@@ -177,38 +156,6 @@ def _getexcepthook():
 
     return excepthook
 
-
-def _sharedsequence_valuegenerator(values, intervallen, nextval):
-    sys.excepthook = _getexcepthook()
-    while True:
-        values.put((nextval, nextval + intervallen))
-        nextval += intervallen
-
-
-class _SharedSequenceGetter(object):
-    def __init__(self, values):
-        self.__values = values
-        self.__current = None
-        self.__nextvalue = None
-
-    def __call__(self, *ignored):
-        if self.__current is None or self.__nextvalue >= self.__current[1]:
-            self.__current = self.__values.get()
-            self.__nextvalue = self.__current[0]
-
-        value = self.__nextvalue
-        self.__nextvalue += 1
-        return value
-
-
-class _SharedSequenceFactory(object):
-    def __init__(self, values):
-        self.__values = values
-
-    def __call__(self):
-        return _SharedSequenceGetter(self.__values)
-
-
 # Stuff for @splitpoint
 
 splitno = None
@@ -309,9 +256,9 @@ def splitpoint(*arg, **kwargs):
 
             return sillywrapper
         # Else set up processes
-        input = queuesize(queuesize)
+        input = Queue(queuesize)
         for n in range(instances):
-            p = Worker(name="Process-%d for %s" % (n, func.__name__),
+            p = Worker(
                 target=_splitprocess, args=(func, input, output, n)
             )
             p.name = "Process-%d for %s" % (n, func.__name__)
@@ -571,7 +518,6 @@ def createflow(*functions, **options):
     closed = [Value("b", 0) for q in queues]  # in shared mem
     for i in range(len(resultfuncs)):
         p = Worker(
-            name="Process-%d for %s" % (i, resultfuncs[i].__name__),
             target=_flowprocess,
             args=(
                 resultfuncs[i],
@@ -826,6 +772,28 @@ class Decoupled(object):
 
 
 # SharedConnectionWrapper stuff
+#TODO: REVISE
+class _SharedConnectionWrapperUserFunction(object):
+    def __init__(self, toserver, fromserver, freelines, funcname):
+        self.__clientid = None
+        self.__toserver = toserver
+        self.__fromserver = fromserver
+        self.__freelines = freelines
+        self.__funcname = funcname
+
+    def __del__(self):
+        if self.__clientid is not None:
+            self.__freelines.put(self.__clientid)
+
+    def __connecttoSCWserver(self):
+        self.__clientid = self.__freelines.get()
+
+    def __call__(self, *args):
+        if self.__clientid is None:
+            self.__connecttoSCWserver()
+        self.__toserver.put((self.__clientid, "_userfunc_" + self.__funcname, args))
+        res = self.__fromserver[self.__clientid].get()
+        assert res == "USERFUNC"
 
 
 class SharedConnectionWrapperClient(object):
@@ -851,6 +819,7 @@ class SharedConnectionWrapperClient(object):
         self.__toserver = toserver
         self.__fromserver = fromserver
         self.__freelines = freelines
+        # TODO: Revise
         if hasattr(connectionmodule, "__name__"):
             self.__connectionmodulename = connectionmodule.__name__
         else:
@@ -894,12 +863,9 @@ class SharedConnectionWrapperClient(object):
             setattr(self, funcname, self.__createuserfunc(funcname))
 
     def __createuserfunc(self, funcname):
-        return _SharedConnectionWrapperUserFunction(
-            self.__toserver,
-            self.__fromserver,
-            self.__freelines,
-            funcname,
-        )
+            return _SharedConnectionWrapperUserFunction(
+                self.__toserver, self.__fromserver, self.__freelines, funcname
+            )
 
     def copy(self):
         """Create a new copy of the SharedConnectionWrapper (same as new)"""
@@ -973,11 +939,6 @@ class SharedConnectionWrapperClient(object):
         return -1
 
     def getunderlyingmodule(self):
-        """Return a reference to the underlying connection's module."""
-        if isinstance(self.__connectionmodulename, str):
-            self.__connectionmodulename = importlib.import_module(
-                self.__connectionmodulename
-            )
         return self.__connectionmodulename
 
     def commit(self):
@@ -1158,7 +1119,7 @@ def shareconnectionwrapper(targetconnection, maxclients=10, userfuncs=()):
                 raise ValueError("Illegal function name: " + func.__name__)
             setattr(serverCW, "_userfunc_" + func.__name__, func)
             userfuncnames.append(func.__name__)
-    serverprocess = Worker(name="Process for shared connection wrapper", target=serverCW.worker)
+    serverprocess = Worker(target=serverCW.worker)
     serverprocess.name = "Process for shared connection wrapper"
     serverprocess.daemon = True
     serverprocess.start()
@@ -1170,6 +1131,34 @@ def shareconnectionwrapper(targetconnection, maxclients=10, userfuncs=()):
 
 
 # Shared sequences
+
+def _sharedsequence_valuegenerator(values, intervallen, nextval):
+    sys.excepthook = _getexcepthook()
+    while True:
+        values.put((nextval, nextval + intervallen))
+        nextval += intervallen
+
+class _SharedSequenceGetter(object):
+    def __init__(self, values):
+        self.__values = values
+        self.__current = None
+        self.__nextvalue = None
+
+    def __call__(self, *ignored):
+        if self.__current is None or self.__nextvalue >= self.__current[1]:
+            self.__current = self.__values.get()
+            self.__nextvalue = self.__current[0]
+        value = self.__nextvalue
+        self.__nextvalue += 1
+        return value
+
+
+class _SharedSequenceFactory(object):
+    def __init__(self, values):
+        self.__values = values
+
+    def __call__(self):
+        return _SharedSequenceGetter(self.__values)
 
 
 def getsharedsequencefactory(startvalue, intervallen=5000):
