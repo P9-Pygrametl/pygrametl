@@ -65,6 +65,7 @@ else:  # For Python 3
 __version__ = "2.9"
 __all__ = [
     "ConnectionWrapper",
+    "PipelinedConnectionWrapper",
     "_stringtypes",
     "copy",
     "datereader",
@@ -1294,6 +1295,68 @@ class BackgroundConnectionWrapper(object):
                 curs.executemany(stmt, args)
             self.__queue.task_done()
 
+class PipelinedConnectionWrapper(ConnectionWrapper):
+    """
+    Wraps a psycopg3 connection to utilize pipeline mode for batching write operations.
+    
+    WARNING: This wrapper relies heavily on deferred network responses. It is highly 
+    sensitive to cache misses. It should only be used when `prefill=True` and `cachesize` 
+    is sufficient to hold much of the working dimension in memory. Frequent cache misses 
+    will trigger forced pipeline synchronizations, severely degrading performance.
+    """
+    
+    def __init__(self, connection, sync_threshold=10000, **kwargs):
+        super().__init__(connection, **kwargs)
+        self._raw_conn = connection  # Store the raw connection to generate fresh contexts
+        self._sync_threshold = sync_threshold
+        self._stmt_count = 0
+        
+        # Initialize pipeline state
+        self._pipeline_context = self._raw_conn.pipeline()
+        self._pipeline = self._pipeline_context.__enter__()
+        self._is_suspended = False
+
+    def execute(self, stmt, arguments=None, namemapping=None, translate=True):
+        super().execute(stmt, arguments, namemapping, translate)
+        
+        if self._is_suspended:
+            return
+
+        self._stmt_count += 1
+        
+        is_select = stmt.lstrip()[:6].upper() == "SELECT"
+        if is_select or self._stmt_count >= self._sync_threshold:
+            self._pipeline.sync()
+            self._stmt_count = 0
+
+    def suspend_pipeline(self):
+        if not self._is_suspended:
+            self._pipeline.sync()
+            self._pipeline_context.__exit__(None, None, None)
+            self._is_suspended = True
+
+    def resume_pipeline(self):
+        if self._is_suspended:
+            # Generate a brand new context manager before re-entering
+            self._pipeline_context = self._raw_conn.pipeline()
+            self._pipeline = self._pipeline_context.__enter__()
+            self._is_suspended = False
+            self._stmt_count = 0
+
+    def commit(self):
+        if not self._is_suspended:
+            self._pipeline.sync()
+            self._stmt_count = 0
+        super().commit()
+
+    def close(self):
+        if not self._is_suspended:
+            try:
+                self._pipeline_context.__exit__(None, None, None)
+            except Exception:
+                pass
+            self._is_suspended = True
+        super().close()
 
 class Error(_DBBaseException):
     pass
