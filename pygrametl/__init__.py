@@ -42,6 +42,7 @@ The package's modules are:
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+from contextlib import contextmanager
 from datetime import date, datetime
 from sys import modules, version_info
 from threading import Thread
@@ -1295,6 +1296,7 @@ class BackgroundConnectionWrapper(object):
                 curs.executemany(stmt, args)
             self.__queue.task_done()
 
+
 class PipelinedConnectionWrapper(ConnectionWrapper):
     """
     Wraps a psycopg3 connection to utilize pipeline mode for batching write operations.
@@ -1306,57 +1308,130 @@ class PipelinedConnectionWrapper(ConnectionWrapper):
     """
     
     def __init__(self, connection, sync_threshold=10000, **kwargs):
-        super().__init__(connection, **kwargs)
-        self._raw_conn = connection  # Store the raw connection to generate fresh contexts
-        self._sync_threshold = sync_threshold
-        self._stmt_count = 0
+        if not hasattr(connection, "pipeline"):
+            raise TypeError(
+                "PipelinedConnectionWrapper needs a psycopg 3 connection "
+                "(pipeline mode, libpq >= 14); got %r" % type(connection)
+            )
         
-        # Initialize pipeline state
+        super().__init__(connection, **kwargs)
+
+        self._raw_conn = connection
+        self._sync_threshold = sync_threshold
+        self._pending = 0
+        self._is_suspended = False
+        self._closed = False
+        self._enter_pipeline()
+
+    def _enter_pipeline(self):
         self._pipeline_context = self._raw_conn.pipeline()
         self._pipeline = self._pipeline_context.__enter__()
         self._is_suspended = False
+        self._pending = 0
+
+    def _sync(self):
+        """Send everything queued and receive the results."""
+        if self._is_suspended or self._closed or self._pending == 0:
+            return
+        pending, self._pending = self._pending, 0
+        try:
+            self._pipeline.sync()
+        except Exception as error:
+            if hasattr(error, "add_note"):
+                error.add_note(
+                    "Raised while synchronizing a pipeline holding %d queued "
+                    "statement(s); the failing statement is one of them, not "
+                    "necessarily the most recent call." % pending
+                )
+            raise
+
+    def suspend_pipeline(self):
+        """Leave pipeline mode (after syncing); needed before COPY."""
+        if not self._is_suspended and not self._closed:
+            self._sync()
+            self._is_suspended = True
+            self._pipeline_context.__exit__(None, None, None)
+ 
+    def resume_pipeline(self):
+        """Re-enter pipeline mode after suspend_pipeline()."""
+        if self._is_suspended and not self._closed:
+            self._enter_pipeline()
+
+    @contextmanager
+    def suspended_pipeline(self):
+        """`with connection.suspended_pipeline(): ...COPY...`"""
+        self.suspend_pipeline()
+        try:
+            yield
+        finally:
+            self.resume_pipeline()
 
     def execute(self, stmt, arguments=None, namemapping=None, translate=True):
         super().execute(stmt, arguments, namemapping, translate)
-        
         if self._is_suspended:
             return
-
-        self._stmt_count += 1
-        
-        is_select = stmt.lstrip()[:6].upper() == "SELECT"
-        if is_select or self._stmt_count >= self._sync_threshold:
-            self._pipeline.sync()
-            self._stmt_count = 0
-
-    def suspend_pipeline(self):
-        if not self._is_suspended:
-            self._pipeline.sync()
-            self._pipeline_context.__exit__(None, None, None)
-            self._is_suspended = True
-
-    def resume_pipeline(self):
+        self._pending += 1
+        if self._pending >= self._sync_threshold:
+            self._sync()
+ 
+    def executemany(self, stmt, params, translate=True):
+        super().executemany(stmt, params, translate)
         if self._is_suspended:
-            # Generate a brand new context manager before re-entering
-            self._pipeline_context = self._raw_conn.pipeline()
-            self._pipeline = self._pipeline_context.__enter__()
-            self._is_suspended = False
-            self._stmt_count = 0
+            return
+        self._pending += 1
+        if self._pending >= self._sync_threshold:
+            self._sync()
+
+    def fetchone(self, *args, **kwargs):
+        self._sync()
+        return super().fetchone(*args, **kwargs)
+ 
+    def fetchonetuple(self):
+        self._sync()
+        return super().fetchonetuple()
+ 
+    def fetchmanytuples(self, cnt):
+        self._sync()
+        return super().fetchmanytuples(cnt)
+ 
+    def fetchalltuples(self):
+        self._sync()
+        return super().fetchalltuples()
+ 
+    def rowcount(self):
+        self._sync()
+        return super().rowcount()
+ 
+    def resultnames(self):
+        self._sync()
+        return super().resultnames()
+ 
+    def rowfactory(self, *args, **kwargs):
+        self._sync()
+        return super().rowfactory(*args, **kwargs)
 
     def commit(self):
-        if not self._is_suspended:
-            self._pipeline.sync()
-            self._stmt_count = 0
+        # endload() in super().commit() may call a bulk loader that suspends
+        # and resumes the pipeline, so sync first.
+        self._sync()
         super().commit()
-
+ 
+    def rollback(self):
+        try:
+            self._sync()
+        except Exception:
+            pass  # rolling back anyway, the queued work is discarded
+        super().rollback()
+ 
     def close(self):
-        if not self._is_suspended:
-            try:
+        try:
+            if not self._is_suspended and not self._closed:
+                self._closed = True
                 self._pipeline_context.__exit__(None, None, None)
-            except Exception:
-                pass
-            self._is_suspended = True
-        super().close()
+        finally:
+            self._closed = True
+            super().close()
+
 
 class Error(_DBBaseException):
     pass
