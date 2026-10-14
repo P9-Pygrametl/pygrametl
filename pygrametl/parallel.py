@@ -28,7 +28,6 @@ Note that this module in many cases will give better results with Jython
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 import copy
-import importlib
 import os
 import sys
 from sys import version_info
@@ -56,8 +55,7 @@ else:
             multiprocessing.set_start_method("fork")
     # Use (C)Python's std. lib.
     from freethreading import Queue, Worker, get_backend
-
-print(get_backend())  # DEBUG
+    print(get_backend())  # DEBUG
 
 def _identity(value):
     return value
@@ -1197,9 +1195,8 @@ def getsharedsequencefactory(startvalue, intervallen=5000):
     p = Worker(
         target=_sharedsequence_valuegenerator,
         args=(values, intervallen, startvalue),
-        name="Process for shared sequence generator",
-        daemon=True,
     )
+    p.daemon = True
     p.start()
 
     return _SharedSequenceFactory(values)

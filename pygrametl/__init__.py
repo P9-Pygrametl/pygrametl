@@ -44,12 +44,12 @@ The package's modules are:
 
 from sys import modules, version_info
 from pygrametl.FIFODict import FIFODict
-from freethreading import Worker
+
 from datetime import date, datetime
 
 if version_info[0] == 2:
     import types
-
+    from threading import Thread as Worker
     _stringtypes = types.StringTypes  # (str, unicode) on Python 2
     from exceptions import Exception as _DBBaseException  # Used by PEP249,but
     from Queue import Queue
@@ -57,7 +57,7 @@ if version_info[0] == 2:
 else:  # For Python 3
     _stringtypes = (str,)
     _DBBaseException = Exception
-    from freethreading import Queue
+    from freethreading import Queue, Worker
 
 __version__ = "2.9"
 __all__ = [
