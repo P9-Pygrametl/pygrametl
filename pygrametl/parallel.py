@@ -48,6 +48,12 @@ else:
         from pygrametl.nogil import Value
     else:
         from multiprocessing import Value
+        import multiprocessing
+        if (
+            multiprocessing.get_start_method(allow_none=True) != "fork"
+            and os.environ.get("SPHINX_BUILD") != "1"
+        ):
+            multiprocessing.set_start_method("fork")
     # Use (C)Python's std. lib.
     from freethreading import Queue, Worker, get_backend
 
