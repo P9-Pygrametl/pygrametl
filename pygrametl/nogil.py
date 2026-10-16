@@ -1,5 +1,5 @@
 from contextlib import contextmanager
-from freethreading import RLock, current_thread
+from freethreading import RLock, current_worker as current_thread
 import psycopg
 from pygrametl import ConnectionWrapper
 
