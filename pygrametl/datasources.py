@@ -323,7 +323,8 @@ class ProcessSource(object):
         self.__batchsize = batchsize
         self.__queuesize = queuesize
         self.__queue = Queue(queuesize)
-        p = Worker(target=self.__worker)
+        # Using the single-underscore method name prevents serialization / mangling failures
+        p = Worker(target=self._worker)
         p.name = "Process for ProcessSource"
         p.start()
 
@@ -341,7 +342,7 @@ class ProcessSource(object):
         self.__queuesize = state["_queuesize"]
         self.__queue = state["_queue"]
 
-    def __worker(self):
+    def _worker(self):
         batch = []
         try:
             for row in self.__source:

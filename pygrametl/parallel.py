@@ -607,25 +607,87 @@ class Decoupled(object):
         self.__otherqueues = {
             dcpld.__instancenumber: dcpld.__fromworker for dcpld in consumes
         }
-        # Will store dicts - see also __decoupledworker
         self.__otherresults = {}
         self.__directupdates = directupdatepositions
 
-        self.__worker = Worker(target=self.__decoupledworker)
-        self.__worker.daemon = True
-        self.__worker.name = "Process for %s object for %s" % (
-            self.__class__.__name__,
-            getattr(obj, "name", "an unnamed object"),
-        )
-        self.__worker.start()
+        # Worker process will be started lazily on the first enqueue
+        self.__worker = None
 
+       # Stuff for the parent process
+
+    def __getstate__(self):
+        # Clear out volatile queues, worker processes, and active results before pickling
+        state = self.__dict__.copy()
+        state['_Decoupled__worker'] = None
+        state['_Decoupled__toworker'] = None
+        state['_Decoupled__fromworker'] = None
+        state['_Decoupled__results'] = {}
+        state['_Decoupled__otherresults'] = {}
+        return state
+
+    def __setstate__(self, state):
+        self.__dict__.update(state)
+
+    def __getattr__(self, name):
+        # Safe lookup: directly fail early on private/mangled keys and uninitialized states
+        if (
+            name in ("_obj", "__dict__") 
+            or not hasattr(self, "_obj")
+            or name.startswith("_Decoupled")
+            or name.startswith("__")
+        ):
+            raise AttributeError(name)
+            
+        res = getattr(self._obj, name)
+        if callable(res) and self.autowrap:
+
+            def wrapperfunc(*args):
+                return self._enqueue(name, *args)
+
+            res = wrapperfunc
+        setattr(self, name, res)
+        return res
+
+    def _ensure_worker_alive(self):
+        # Lazily instantiate queues and the background worker process
+        if getattr(self, "_Decoupled__toworker", None) is None:
+            self.__toworker = Queue(200)
+            if hasattr(self, '_Decoupled__fromworker') and self._Decoupled__fromworker is not None:
+                self.__fromworker = Queue(200)
+                
+        if getattr(self, "_Decoupled__worker", None) is None:
+            # We explicitly pass the newly created queues as arguments
+            self.__worker = Worker(
+                target=self._decoupledworker, 
+                args=(self.__toworker, getattr(self, "_Decoupled__fromworker", None))
+            )
+            self.__worker.daemon = True
+            self.__worker.name = "Process for %s object for %s" % (
+                self.__class__.__name__,
+                getattr(self._obj, "name", "an unnamed object"),
+            )
+            self.__worker.start()
+
+    def _enqueue(self, funcname, *args):
+        self._ensure_worker_alive()
+        future = FutureResult(self.__instancenumber, self.__futurecnt)
+        self.__futurecnt += 1
+        self.__batch.append([future.id, funcname, args])
+        if len(self.__batch) >= self.batchsize:
+            self._endbatch()
+        return future
+
+    def _enqueuenoreturn(self, funcname, *args):
+        self._ensure_worker_alive()
+        self.__batch.append([None, funcname, args])
+        if len(self.__batch) >= self.batchsize:
+            self._endbatch()
     # Stuff for the forked process
 
     def __getresultfromother(self, queuenumber, id):
         while True:
             if id in self.__otherresults[queuenumber]:
                 return self.__otherresults[queuenumber].pop(id)
-            # else wait for more results to become available
             self.__otherresults[queuenumber].update(
                 self.__otherqueues[queuenumber].get()
             )
@@ -676,7 +738,8 @@ class Decoupled(object):
             else:
                 raise ValueError("Positions must be of length 2 or 3")
 
-    def __decoupledworker(self):
+    def _decoupledworker(self, toworker, fromworker):
+        """Worker method modified to receive queues as parameters to prevent unpickling issues."""
         sys.excepthook = _getexcepthook()
         if hasattr(self._obj, "_decoupled") and callable(self._obj._decoupled):
             self._obj._decoupled()
@@ -685,12 +748,10 @@ class Decoupled(object):
             self.__otherresults[creatorid] = {}
 
         while True:
-            batch = self.__toworker.get()
-            ###
+            batch = toworker.get()
             if batch == "STOP":
-                self.__toworker.task_done()
+                toworker.task_done()
                 return
-            ###
             resbatch = []
             for [id, funcname, args] in batch:
                 if self.__otherqueues and args:
@@ -704,70 +765,42 @@ class Decoupled(object):
                     else:
                         args = self.__replacefuturesintuple(args)
                 func = getattr(self._obj, funcname)
-                res = func(*args)  # NB: func's side-effects on args are ignored
+                res = func(*args)
                 if id is not None:
                     resbatch.append((id, res))
-            if self.__fromworker and resbatch:
-                self.__fromworker.put(resbatch)
-            self.__toworker.task_done()
-
-    # Stuff for the parent process
-
-    def __getattr__(self, name):
-        res = getattr(self._obj, name)
-        if callable(res) and self.autowrap:
-
-            def wrapperfunc(*args):
-                return self._enqueue(name, *args)
-
-            res = wrapperfunc
-        setattr(self, name, res)  # NB: Values are only read once...
-        return res
-
-    def _enqueue(self, funcname, *args):
-        future = FutureResult(self.__instancenumber, self.__futurecnt)
-        self.__futurecnt += 1
-        self.__batch.append([future.id, funcname, args])
-        if len(self.__batch) >= self.batchsize:
-            self._endbatch()
-        return future
-
-    def _enqueuenoreturn(self, funcname, *args):
-        self.__batch.append([None, funcname, args])
-        if len(self.__batch) >= self.batchsize:
-            self._endbatch()
+            if fromworker and resbatch:
+                fromworker.put(resbatch)
+            toworker.task_done()
 
     def _getresult(self, future):
         if self.__fromworker is None:
             raise RuntimeError("Return values are not kept")
         if future.creator != self.__instancenumber:
             raise ValueError("Cannot return results from other instances")
-        # else find and return the result
         while True:
             if future.id in self.__results:
                 return self.__results.pop(future.id)
-            # else wait for results to become available
             self.__results.update(self.__fromworker.get())
 
     def _endbatch(self):
         if self.__batch:
+            self._ensure_worker_alive()
             self.__toworker.put(self.__batch)
             self.__batch = []
 
     def _join(self):
         self._endbatch()
-        self.__toworker.join()
+        if getattr(self, "_Decoupled__toworker", None) is not None:
+            self.__toworker.join()
 
     def shutdowndecoupled(self):
-        """Let the Decoupled instance finish its tasks and stop it.
-
-        The Decoupled instance should not be used after this.
-        """
+        """Let the Decoupled instance finish its tasks and stop it."""
         self._join()
-        self.__toworker.put("STOP")
-        self.__toworker.join()
-        self.__toworker.close()
-        if self.__fromworker is not None:
+        if getattr(self, "_Decoupled__toworker", None) is not None:
+            self.__toworker.put("STOP")
+            self.__toworker.join()
+            self.__toworker.close()
+        if getattr(self, "_Decoupled__fromworker", None) is not None:
             self.__fromworker.close()
         try:
             pygrametl._alltables.remove(self)
