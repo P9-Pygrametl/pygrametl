@@ -43,7 +43,7 @@ if sys.platform.startswith("java"):
     # Jython specific code in jythonmultiprocessing
     from pygrametl.jythonmultiprocessing import Queue, Process as Worker, Value
 else:
-    if sys._is_gil_enabled():
+    if not sys._is_gil_enabled():
         from pygrametl.nogil import Value
     else:
         from multiprocessing import Value
