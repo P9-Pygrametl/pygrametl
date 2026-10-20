@@ -71,41 +71,12 @@ __all__ = [
     "UnpivotingSource",
 ]
 
-
-def _reconstruct_csv_source(cls, state):
-    """Reconstruct CSVSource or TypedCSVSource from pickled state."""
-    filename = state.pop("filename")
-    encoding = state.pop("encoding")
-    offset = state.pop("offset")
-    fieldnames = state.pop("saved_fieldnames")
-
-    if not (filename and os.path.exists(filename)):
-        raise ValueError(
-            "Cannot unpickle CSVSource: file %r is not accessible"
-            % filename
-        )
-
-    # Instantiate empty class instance without calling __init__
-    obj = cls.__new__(cls)
-    obj.__dict__.update(state)
-
-    file_obj = open(filename, "r", encoding=encoding)
-    obj._init_reader(file_obj, fieldnames, offset)
-    return obj
-
-
 class CSVSource(object):
     """A class for iterating a CSV file as dictionaries with pickling
     support."""
 
     def __init__(self, f, fieldnames=None, restkey=None, restval=None,
                  dialect="excel", *args, **kwds):
-        """Arguments:
-
-- f: An iterable object, file handle, or file path string/Path.
-- fieldnames, restkey, restval, dialect, *args, **kwds:
-          Passed on to csv.DictReader
-        """
         self.f_arg = f
         self.fieldnames_arg = fieldnames
         self.restkey = restkey
@@ -148,6 +119,28 @@ class CSVSource(object):
 
     next = __next__  # Python 2 / Jython compatibility
 
+    @classmethod
+    def _reconstruct(cls, state):
+        """Reconstruct CSVSource or TypedCSVSource from pickled state."""
+        filename = state.pop("filename")
+        encoding = state.pop("encoding")
+        offset = state.pop("offset")
+        fieldnames = state.pop("saved_fieldnames")
+
+        if not (filename and os.path.exists(filename)):
+            raise ValueError(
+                "Cannot unpickle CSVSource: file %r is not accessible"
+                % filename
+            )
+
+        # Instantiate empty class instance without calling __init__
+        obj = cls.__new__(cls)
+        obj.__dict__.update(state)
+
+        file_obj = open(filename, "r", encoding=encoding)
+        obj._init_reader(file_obj, fieldnames, offset)
+        return obj
+
     def __reduce__(self):
         state = self.__dict__.copy()
         del state["file_obj"], state["reader"]
@@ -166,7 +159,10 @@ class CSVSource(object):
         state["saved_fieldnames"] = (
             getattr(self.reader, "_fieldnames", None) or self.fieldnames_arg
         )
-        return (_reconstruct_csv_source, (self.__class__, state))
+        
+        # Use the classmethod as the reconstructor; self.__class__ 
+        # correctly handles TypedCSVSource instances too!
+        return (self.__class__._reconstruct, (state,))
 
 
 class TypedCSVSource(CSVSource):
@@ -189,8 +185,7 @@ class TypedCSVSource(CSVSource):
             if not callable(v):
                 raise TypeError("The values in casts must be callable")
         self._casts = casts
-        CSVSource.__init__(
-            self,
+        super().__init__(
             f,
             fieldnames=fieldnames,
             restkey=restkey,
@@ -201,19 +196,13 @@ class TypedCSVSource(CSVSource):
         )
 
     def __next__(self):
-        row = CSVSource.__next__(self)
+        row = super().__next__()
         for att, func in self._casts.items():
             row[att] = func(row[att])
         return row
 
     def next(self):
         return self.__next__()
-
-    def __reduce__(self):
-        # Obtain reduction tuple from base class which constructs _reconstruct_csv_source
-        reconstruct_func, (cls, state) = CSVSource.__reduce__(self)
-        state["_casts"] = self._casts
-        return (reconstruct_func, (self.__class__, state))
 
 
 class SQLSource(object):
