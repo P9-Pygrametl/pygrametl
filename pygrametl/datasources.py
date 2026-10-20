@@ -71,6 +71,28 @@ __all__ = [
 ]
 
 
+def _reconstruct_csv_source(cls, state):
+    """Reconstruct CSVSource or TypedCSVSource from pickled state."""
+    filename = state.pop("filename")
+    encoding = state.pop("encoding")
+    offset = state.pop("offset")
+    fieldnames = state.pop("saved_fieldnames")
+
+    if not (filename and os.path.exists(filename)):
+        raise ValueError(
+            "Cannot unpickle CSVSource: file %r is not accessible"
+            % filename
+        )
+
+    # Instantiate empty class instance without calling __init__
+    obj = cls.__new__(cls)
+    obj.__dict__.update(state)
+
+    file_obj = open(filename, "r", encoding=encoding)
+    obj._init_reader(file_obj, fieldnames, offset)
+    return obj
+
+
 class CSVSource(object):
     """A class for iterating a CSV file as dictionaries with pickling
     support."""
@@ -125,7 +147,7 @@ class CSVSource(object):
 
     next = __next__  # Python 2 / Jython compatibility
 
-    def __getstate__(self):
+    def __reduce__(self):
         state = self.__dict__.copy()
         del state["file_obj"], state["reader"]
 
@@ -143,23 +165,7 @@ class CSVSource(object):
         state["saved_fieldnames"] = (
             getattr(self.reader, "_fieldnames", None) or self.fieldnames_arg
         )
-        return state
-
-    def __setstate__(self, state):
-        filename = state.pop("filename")
-        encoding = state.pop("encoding")
-        offset = state.pop("offset")
-        fieldnames = state.pop("saved_fieldnames")
-        self.__dict__.update(state)
-
-        if not (filename and os.path.exists(filename)):
-            raise ValueError(
-                "Cannot unpickle CSVSource: file %r is not accessible"
-                % filename
-            )
-
-        file_obj = open(filename, "r", encoding=encoding)
-        self._init_reader(file_obj, fieldnames, offset)
+        return (_reconstruct_csv_source, (self.__class__, state))
 
 
 class TypedCSVSource(CSVSource):
@@ -202,14 +208,11 @@ class TypedCSVSource(CSVSource):
     def next(self):
         return self.__next__()
 
-    def __getstate__(self):
-        state = CSVSource.__getstate__(self)
+    def __reduce__(self):
+        # Obtain reduction tuple from base class which constructs _reconstruct_csv_source
+        reconstruct_func, (cls, state) = CSVSource.__reduce__(self)
         state["_casts"] = self._casts
-        return state
-
-    def __setstate__(self, state):
-        self._casts = state["_casts"]
-        CSVSource.__setstate__(self, state)
+        return (reconstruct_func, (self.__class__, state))
 
 
 class SQLSource(object):
@@ -313,6 +316,13 @@ class PandasSource(object):
             yield row
 
 
+def _reconstruct_process_source(cls, state):
+    """Reconstruct ProcessSource from pickled state."""
+    obj = cls.__new__(cls)
+    obj.__dict__.update(state)
+    return obj
+
+
 class ProcessSource(object):
     """A class for iterating another source in a separate process"""
 
@@ -328,19 +338,14 @@ class ProcessSource(object):
         p.name = "Process for ProcessSource"
         p.start()
 
-    def __getstate__(self):
-        return {
+    def __reduce__(self):
+        state = {
             "_source": self.__source,
             "_batchsize": self.__batchsize,
             "_queuesize": self.__queuesize,
             "_queue": self.__queue,
         }
-
-    def __setstate__(self, state):
-        self.__source = state["_source"]
-        self.__batchsize = state["_batchsize"]
-        self.__queuesize = state["_queuesize"]
-        self.__queue = state["_queue"]
+        return (_reconstruct_process_source, (self.__class__, state))
 
     def _worker(self):
         batch = []
