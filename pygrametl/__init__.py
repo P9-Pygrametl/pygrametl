@@ -648,6 +648,15 @@ def getdefaulttargetconnection():
     return _defaulttargetconnection
 
 
+def _reconstruct_wrapper(cls, state):
+    """Reconstruct ConnectionWrapper or BackgroundConnectionWrapper from pickled state."""
+    obj = cls.__new__(cls)
+    obj.__dict__.update(state)
+    # Restore the database cursor interface
+    obj._ConnectionWrapper__cursor = obj._ConnectionWrapper__connection.cursor()
+    return obj
+
+
 class ConnectionWrapper(object):
     """Provide a uniform representation of different database connection types.
 
@@ -998,16 +1007,13 @@ class ConnectionWrapper(object):
         else:
             return tuple([t[0] for t in self.__cursor.description])
         
-    def __getstate__(self):
-    # In case the ConnectionWrapper is pickled (to be sent to another
-    # process), we need to create a new cursor when it is unpickled.
+    def __reduce__(self):
+        # In case the ConnectionWrapper is pickled (to be sent to another
+        # process), we need to create a new cursor when it is unpickled.
         res = self.__dict__.copy()
         del res["_ConnectionWrapper__cursor"]  # a dirty trick, but...
-        return res
+        return (_reconstruct_wrapper, (self.__class__, res))
 
-    def __setstate__(self, dictdata):
-        self.__dict__.update(dictdata)
-        self.__cursor = self.__connection.cursor()
 
 class BackgroundConnectionWrapper(object):
     """Deprecated: This class is not maintained anymore! Use ConnectionWrapper
@@ -1273,15 +1279,13 @@ class BackgroundConnectionWrapper(object):
         else:
             return tuple([t[0] for t in self.__cursor.description])
 
-    def __getstate__(self):
+    def __reduce__(self):
         # In case the ConnectionWrapper is pickled (to be sent to another
         # process), we need to create a new cursor when it is unpickled.
         res = self.__dict__.copy()
-        del res["_ConnectionWrapper__cursor"]  # a dirty trick, but...
-
-    def __setstate__(self, dictdata):
-        self.__dict__.update(dictdata)
-        self.__cursor = self.__connection.cursor()
+        if "_ConnectionWrapper__cursor" in res:
+            del res["_ConnectionWrapper__cursor"]  # a dirty trick, but...
+        return (_reconstruct_wrapper, (self.__class__, res))
 
     def __worker(self):
         while True:
