@@ -39,8 +39,6 @@ class PicklableConnectionWrapper(ConnectionWrapper):
         self._stmtcachesize = stmtcachesize
         self._paramstyle = paramstyle
         self._copyintonew = copyintonew
-        
-        # Extract and store the serializable connection parameters immediately.
         self._conn_params = connection.info.get_parameters()
         
         super().__init__(
@@ -55,29 +53,16 @@ class PicklableConnectionWrapper(ConnectionWrapper):
         connection.autocommit = False
         return connection
 
-    def __getstate__(self):
-        return {
-            "_stmtcachesize": self._stmtcachesize,
-            "_paramstyle": self._paramstyle,
-            "_copyintonew": self._copyintonew,
-            "_conn_params": self._conn_params,
-        }
-
-    def __setstate__(self, state):
-        self._stmtcachesize = state["_stmtcachesize"]
-        self._paramstyle = state["_paramstyle"]
-        self._copyintonew = state["_copyintonew"]
-        self._conn_params = state["_conn_params"]
-        
-        ConnectionWrapper.__init__(
-            self,
-            self._connect(),
-            stmtcachesize=self._stmtcachesize,
-            paramstyle=self._paramstyle,
-            copyintonew=self._copyintonew,
+    def __reduce__(self):
+        return (
+            self.__class__,
+            (
+                self._conn_params,  
+                self._stmtcachesize,
+                self._paramstyle,
+                self._copyintonew,
+            ),
         )
-
-
 class PicklableSQLSource(object):
     """An SQLSource wrapper that delegates to SQLSource and safely handles
     pickling/unpickling by discarding active cursor references.
@@ -88,22 +73,14 @@ class PicklableSQLSource(object):
         self._kwargs = kwargs
         self._source = SQLSource(*args, **kwargs)
 
-    def __getstate__(self):
-        # We save the arguments needed to reconstruct the source
-        # instead of serializing the live SQLSource and its active cursor.
-        return {
-            "_args": self._args,
-            "_kwargs": self._kwargs,
-        }
-
-    def __setstate__(self, state):
-        from pygrametl.datasources import SQLSource
-        self._args = state["_args"]
-        self._kwargs = state["_kwargs"]
-        
-        # Re-instantiate the fresh SQLSource.
-        # This triggers PicklableConnectionWrapper to reconnect automatically.
-        self._source = SQLSource(*self._args, **self._kwargs)
+    def __reduce__(self):
+        # Return the class and the arguments needed to recreate it from scratch.
+        # This naturally discards active cursor references.
+        return (
+            self.__class__,
+            self._args,
+            self._kwargs,
+        )
 
     def __iter__(self):
         return self._source.__iter__()
