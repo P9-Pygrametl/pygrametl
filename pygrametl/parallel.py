@@ -31,6 +31,7 @@ import copy
 import os
 import sys
 from sys import version_info
+from pygrametl.nogil import Pickle
 
 import pygrametl
 
@@ -576,6 +577,7 @@ class FutureResult(object):
 # pygrametl.tables
 
 
+
 class Decoupled(object):
     __instances = []
 
@@ -615,7 +617,7 @@ class Decoupled(object):
 
        # Stuff for the parent process
 
-    def __getstate__(self):
+    def __reduce__(self):
         # Clear out volatile queues, worker processes, and active results before pickling
         state = self.__dict__.copy()
         state['_Decoupled__worker'] = None
@@ -623,10 +625,7 @@ class Decoupled(object):
         state['_Decoupled__fromworker'] = None
         state['_Decoupled__results'] = {}
         state['_Decoupled__otherresults'] = {}
-        return state
-
-    def __setstate__(self, state):
-        self.__dict__.update(state)
+        return (Pickle.reconstruct, (self.__class__, state))
 
     def __getattr__(self, name):
         # Safe lookup: directly fail early on private/mangled keys and uninitialized states
@@ -832,7 +831,6 @@ class _SharedConnectionWrapperUserFunction(object):
         res = self.__fromserver[self.__clientid].get()
         assert res == "USERFUNC"
 
-
 class SharedConnectionWrapperClient(object):
     """Provide access to a shared ConnectionWrapper.
 
@@ -865,14 +863,11 @@ class SharedConnectionWrapperClient(object):
         if pygrametl._defaulttargetconnection is None:
             pygrametl._defaulttargetconnection = self
 
-    def __getstate__(self):
+    def __reduce__(self):
         res = self.__dict__.copy()
+        self.__createalluserfuncs()
         res["_SharedConnectionWrapperClient__clientid"] = None
-        return res
-
-    def __setstate__(self, state):
-        self.__dict__.update(state)
-        self.__createalluserfuncs()  # A new self exists now
+        return (Pickle.reconstruct, (self.__class__, res))
 
     def __del__(self):
         if self.__clientid is not None:

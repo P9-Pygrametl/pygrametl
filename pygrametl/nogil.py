@@ -4,6 +4,13 @@ from pygrametl import ConnectionWrapper
 
 __all__ = ["Value", "PicklableConnectionWrapper", "PicklableSQLSource"]
 
+class Pickle:
+    def reconstruct(cls, state):
+        """Reconstruct from pickled state."""
+        obj = cls.__new__(cls)
+        obj.__dict__.update(state)
+        return obj
+
 class Value:
     """Drop-in threading replacement for multiprocessing.Value."""
     def __init__(self, typecode: str, value=0):

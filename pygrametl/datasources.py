@@ -35,6 +35,7 @@ from csv import DictReader
 
 import pygrametl
 from pygrametl import ConnectionWrapper, tables
+from pygrametl.nogil import Pickle
 
 if sys.platform.startswith("java"):
     # Jython specific code
@@ -316,13 +317,6 @@ class PandasSource(object):
             yield row
 
 
-def _reconstruct_process_source(cls, state):
-    """Reconstruct ProcessSource from pickled state."""
-    obj = cls.__new__(cls)
-    obj.__dict__.update(state)
-    return obj
-
-
 class ProcessSource(object):
     """A class for iterating another source in a separate process"""
 
@@ -345,7 +339,7 @@ class ProcessSource(object):
             "_queuesize": self.__queuesize,
             "_queue": self.__queue,
         }
-        return (_reconstruct_process_source, (self.__class__, state))
+        return (Pickle.reconstruct, (self.__class__, state))
 
     def _worker(self):
         batch = []

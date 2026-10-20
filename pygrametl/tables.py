@@ -53,6 +53,7 @@ from time import sleep
 
 import pygrametl
 from pygrametl.FIFODict import FIFODict
+from pygrametl.nogil import Pickle
 
 try:
     from pygrametl.parallel import Decoupled
@@ -2532,9 +2533,6 @@ class AccumulatingSnapshotFactTable(FactTable):
         )
         self.targetconnection.execute(updatesql, newrow, namemapping)
 
-
-# TODO: Rethink __getstate__ and __setstate__ for pickling. The current implementation
-#       is a bit of a hack and it would be better to have a more general solution
 class _BaseBulkloadable(object):
     """Common functionality for bulkloadable tables"""
 
@@ -2637,16 +2635,11 @@ class _BaseBulkloadable(object):
         self.__count = 0
         self.__ready = True
 
-    def __getstate__(self):
+    def __reduce__(self):
         state = self.__dict__.copy()
         state.pop("_BaseBulkloadable__namedtempfile", None)
         state.pop("tempdest", None)
-        return state
-
-    def __setstate__(self, state):
-        self.__dict__.update(state)
-        self.__namedtempfile = _TempFileState(self.__filename)
-        self.tempdest = self.__namedtempfile.file
+        return (Pickle.reconstruct, (self.__class__, state))
 
     def __preparetempfile(self):
         self.__namedtempfile = tempfile.NamedTemporaryFile()
