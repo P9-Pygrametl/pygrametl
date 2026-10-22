@@ -30,7 +30,7 @@ Note that this module in many cases will give better results with Jython
 import copy
 import os
 import sys
-from sys import version_info
+from sys import version_info, _is_gil_enabled
 
 import pygrametl
 
@@ -38,23 +38,27 @@ try:
     from Queue import Empty  # Python 2
 except ImportError:
     from queue import Empty  # Python 3
-
 if sys.platform.startswith("java"):
     # Jython specific code in jythonmultiprocessing
-    import pygrametl.jythonmultiprocessing as multiprocessing
+    from pygrametl.jythonmultiprocessing import Process, Queue, Queue as JoinableQueue, Value
 else:
-    # Use (C)Python's std. lib.
-    import multiprocessing
+    if not _is_gil_enabled():
+        from pygrametl.nogil import Value
+        from threading import Thread as Process
+        from queue import Queue, Queue as JoinableQueue
+    else:
+        import multiprocessing
+        from multiprocessing import Process, Queue, JoinableQueue, Value
 
     # This module assumes processes inherit state through fork. Thus, it
     # requires that the platform supports the fork start method. The start
     # method is not set to fork when Sphinx is building the documentation as it
     # prevents Windows from doing so
-    if (
-        multiprocessing.get_start_method(allow_none=True) != "fork"
-        and os.environ.get("SPHINX_BUILD") != "1"
-    ):
-        multiprocessing.set_start_method("fork")
+        if (
+            multiprocessing.get_start_method(allow_none=True) != "fork"
+            and os.environ.get("SPHINX_BUILD") != "1"
+        ):
+            multiprocessing.set_start_method("fork")
 
 __all__ = [
     "Decoupled",
@@ -109,7 +113,7 @@ def _getexitfunction():
     # set up the terminator
     global _toterminator
     if _toterminator is None:
-        _toterminator = multiprocessing.Queue()
+        _toterminator = Queue()
 
         def terminatorfunction():
             pids = {_masterpid}
@@ -124,7 +128,7 @@ def _getexitfunction():
                         os.kill(p, 9)
                     return
 
-        terminatorprocess = multiprocessing.Process(target=terminatorfunction)
+        terminatorprocess = Process(target=terminatorfunction)
         terminatorprocess.daemon = True
         terminatorprocess.start()
 
@@ -257,9 +261,9 @@ def splitpoint(*arg, **kwargs):
 
             return sillywrapper
         # Else set up processes
-        input = multiprocessing.JoinableQueue(queuesize)
+        input = JoinableQueue(queuesize)
         for n in range(instances):
-            p = multiprocessing.Process(
+            p = Process(
                 target=_splitprocess, args=(func, input, output, n)
             )
             p.name = "Process-%d for %s" % (n, func.__name__)
@@ -487,8 +491,8 @@ def createflow(*functions, **options):
     # A special case
     if not functions:
         return Flow(
-            [multiprocessing.JoinableQueue()],
-            [multiprocessing.Value("b", 0)],
+            [JoinableQueue()],
+            [Value("b", 0)],
             1,
         )
 
@@ -514,11 +518,11 @@ def createflow(*functions, **options):
     batchsize = ("batchsize" in options and options["batchsize"]) or 25
     if batchsize < 1:
         batchsize = 25
-    queues = [multiprocessing.JoinableQueue(queuesize) for f in resultfuncs]
-    queues.append(multiprocessing.JoinableQueue(queuesize))  # for the results
-    closed = [multiprocessing.Value("b", 0) for q in queues]  # in shared mem
+    queues = [JoinableQueue(queuesize) for f in resultfuncs]
+    queues.append(JoinableQueue(queuesize))  # for the results
+    closed = [Value("b", 0) for q in queues]  # in shared mem
     for i in range(len(resultfuncs)):
-        p = multiprocessing.Process(
+        p = Process(
             target=_flowprocess,
             args=(
                 resultfuncs[i],
@@ -596,9 +600,9 @@ class Decoupled(object):
         self.__batch = []
         self.__results = {}
         self.autowrap = autowrap
-        self.__toworker = multiprocessing.JoinableQueue(queuesize)
+        self.__toworker = JoinableQueue(queuesize)
         if returnvalues:
-            self.__fromworker = multiprocessing.JoinableQueue(queuesize)
+            self.__fromworker = JoinableQueue(queuesize)
         else:
             self.__fromworker = None
         self.__otherqueues = {
@@ -608,7 +612,7 @@ class Decoupled(object):
         self.__otherresults = {}
         self.__directupdates = directupdatepositions
 
-        self.__worker = multiprocessing.Process(target=self.__decoupledworker)
+        self.__worker = Process(target=self.__decoupledworker)
         self.__worker.daemon = True
         self.__worker.name = "Process for %s object for %s" % (
             self.__class__.__name__,
@@ -1069,9 +1073,9 @@ def shareconnectionwrapper(targetconnection, maxclients=10, userfuncs=()):
     - userfuncs: a sequence of functions to add to the shared
       ConnectionWrapper. Default: ()
     """
-    toserver = multiprocessing.JoinableQueue(5000)
-    toclients = [multiprocessing.Queue() for i in range(maxclients)]
-    freelines = multiprocessing.Queue()
+    toserver = JoinableQueue(5000)
+    toclients = [Queue() for i in range(maxclients)]
+    freelines = Queue()
     for i in range(maxclients):
         freelines.put(i)
     serverCW = SharedConnectionWrapperServer(targetconnection, toserver, toclients)
@@ -1100,7 +1104,7 @@ def shareconnectionwrapper(targetconnection, maxclients=10, userfuncs=()):
                 raise ValueError("Illegal function name: " + func.__name__)
             setattr(serverCW, "_userfunc_" + func.__name__, func)
             userfuncnames.append(func.__name__)
-    serverprocess = multiprocessing.Process(target=serverCW.worker)
+    serverprocess = Process(target=serverCW.worker)
     serverprocess.name = "Process for shared connection wrapper"
     serverprocess.daemon = True
     serverprocess.start()
@@ -1138,7 +1142,7 @@ def getsharedsequencefactory(startvalue, intervallen=5000):
         startvalue = 0
 
     # We use a Queue to ensure that intervals are only given to one deliverer
-    values = multiprocessing.Queue(10)
+    values = Queue(10)
 
     # A worker that fills the queue
     def valuegenerator(nextval):
@@ -1147,7 +1151,7 @@ def getsharedsequencefactory(startvalue, intervallen=5000):
             values.put((nextval, nextval + intervallen))
             nextval += intervallen
 
-    p = multiprocessing.Process(target=valuegenerator, args=(startvalue,))
+    p = Process(target=valuegenerator, args=(startvalue,))
     p.daemon = True
     p.start()
 
