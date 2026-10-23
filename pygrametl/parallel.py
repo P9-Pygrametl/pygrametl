@@ -40,12 +40,12 @@ except ImportError:
     from queue import Empty  # Python 3
 if sys.platform.startswith("java"):
     # Jython specific code in jythonmultiprocessing
-    from pygrametl.jythonmultiprocessing import Process, Queue, Queue as JoinableQueue, Value
+    from pygrametl.jythonmultiprocessing import Process, Queue, JoinableQueue, Value
 else:
     if not _is_gil_enabled():
-        from pygrametl.nogil import Value
+        from pygrametl.nogil import Value, JoinableQueue
         from threading import Thread as Process
-        from queue import Queue, Queue as JoinableQueue
+        from queue import Queue
     else:
         import multiprocessing
         from multiprocessing import Process, Queue, JoinableQueue, Value
