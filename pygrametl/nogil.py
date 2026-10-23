@@ -1,5 +1,5 @@
 from threading import RLock
-
+from queue import Queue
 
 __all__ = ["Value"]
 
@@ -23,4 +23,7 @@ class Value:
         with self.lock:
             self._value = new_value
 
+class JoinableQueue(Queue):
+    def close(self):
+        pass
     
