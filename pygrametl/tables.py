@@ -1706,6 +1706,214 @@ class SlowlyChangingDimension(Dimension):
 
 SCDimension = SlowlyChangingDimension
 
+class PostgreSQLOptimizedSCD(SlowlyChangingDimension):
+    """Experimental PostgreSQL optimisation for SCD Type 2 changes.
+
+    Combines closing the previous version and inserting the new
+    version into one SQL statement.
+
+    Intended for Experiment 3B, not general production use.
+    """
+
+    def __init__(self, *args, **kwargs):
+        # For this prototype, require keyword arguments so we can
+        # verify which callbacks and key generator are configured.
+        if args:
+            raise ValueError(
+                "PostgreSQLOptimizedSCD requires keyword arguments"
+            )
+
+        super().__init__(**kwargs)
+
+        self._postgres_fastpath = (
+            self.versionatt is not None
+            and self.fromatt is not None
+            and self.toatt is not None
+            and self.srcdateatt is not None
+            and not self.type1atts
+            and kwargs.get("fromfinder") is None
+            and kwargs.get("tofinder") is None
+            and kwargs.get("idfinder") is None
+            and self.__dict__.get("_unused", None) is None
+        )
+
+        # Build a parameterised PostgreSQL statement.
+        #
+        # The UPDATE returns one row. The INSERT selects from it,
+        # so the INSERT only runs when that UPDATE succeeds.
+        #
+        # Keep the old-key parameters separate from the new row.
+        columns = ", ".join(self.quotelist(self.all))
+        values = ", ".join(
+            f"%({att})s" for att in self.all
+        )
+
+        self._combined_type2_sql = (
+            "WITH closed_version AS ("
+            f" UPDATE {self.name}"
+            f" SET {self.quote(self.toatt)} = "
+            "%(__scd_previous_validto)s"
+            f" WHERE {self.quote(self.key)} = "
+            "%(__scd_previous_key)s"
+            f" RETURNING {self.quote(self.key)}"
+            ") "
+            f"INSERT INTO {self.name} ({columns}) "
+            f"SELECT {values} FROM closed_version"
+        )
+
+    def scdensure(self, row, namemapping={}):
+        # Unsupported configurations retain the original behaviour.
+        if (
+            not self._postgres_fastpath
+            or namemapping
+            or self.maxto is not None
+        ):
+            return super().scdensure(row, namemapping)
+
+        # Match the original lookup behaviour.
+        oldkey = self.lookup(row, namemapping)
+
+        if oldkey is None:
+            # Keep the original new-member insertion path.
+            return super().scdensure(row, namemapping)
+
+        other = self.getbykey(oldkey)
+
+        # A previously closed version needs the original logic.
+        if other[self.toatt] != self.maxto:
+            return super().scdensure(row, namemapping)
+
+        # Determine whether the incoming member differs.
+        # Preserve the original comparison order and early exit.
+        addnewversion = False
+
+        for att in self.all:
+            if att in (
+                self.key,
+                self.orderingatt,
+                self.versionatt,
+            ):
+                continue
+
+            elif att == self.toatt:
+                if other[self.toatt] != self.maxto:
+                    addnewversion = True
+
+            elif att == self.fromatt:
+                rdt = self.srcdateparser(
+                    row[self.srcdateatt]
+                )
+
+                if rdt == other[self.fromatt]:
+                    continue
+
+                elif isinstance(
+                    rdt, type(other[self.fromatt])
+                ):
+                    addnewversion = True
+
+                else:
+                    modref = (
+                        self.targetconnection
+                        .getunderlyingmodule()
+                    )
+                    rowdate = modref.Date(
+                        rdt.year,
+                        rdt.month,
+                        rdt.day,
+                    )
+
+                    if (
+                        str(rowdate).strip("'\"")
+                        != str(other[self.fromatt]).strip("'\"")
+                    ):
+                        addnewversion = True
+
+            else:
+                mapped = namemapping.get(att) or att
+
+                if row[mapped] != other[att]:
+                    addnewversion = True
+
+            if addnewversion:
+                break
+
+        if not addnewversion:
+            # Preserve original unchanged-member row mutations.
+            key = namemapping.get(self.key) or self.key
+            versionatt = (
+                namemapping.get(self.versionatt)
+                or self.versionatt
+            )
+            fromatt = (
+                namemapping.get(self.fromatt)
+                or self.fromatt
+            )
+            toatt = (
+                namemapping.get(self.toatt)
+                or self.toatt
+            )
+
+            row[key] = oldkey
+            row[versionatt] = other[self.versionatt]
+            row[fromatt] = other[self.fromatt]
+            row[toatt] = other[self.toatt]
+
+            return oldkey
+
+        # --------------------------------------------------
+        # Optimised Type 2 version creation
+        # --------------------------------------------------
+
+        key = self.key
+
+        # The original SCD removes any supplied surrogate key
+        # before creating a new version.
+        row.pop(key, None)
+
+        row[self.versionatt] = (
+            other[self.versionatt] + 1
+        )
+
+        row[self.fromatt] = self.fromfinder(
+            self.targetconnection,
+            row,
+            namemapping,
+        )
+
+        row[self.toatt] = self.maxto
+
+        # Use pygrametl's original surrogate-key generator.
+        newkey = self.idfinder(row, namemapping)
+        row[key] = newkey
+
+        # The default tofinder is the source-date reader.
+        # It does not require the new row to exist in PostgreSQL.
+        previous_validto = self.tofinder(
+            self.targetconnection,
+            row,
+            namemapping,
+        )
+
+        params = dict(row)
+        params["__scd_previous_key"] = oldkey
+        params["__scd_previous_validto"] = previous_validto
+
+        # One PostgreSQL statement instead of INSERT + UPDATE.
+        self.targetconnection.execute(
+            self._combined_type2_sql,
+            params,
+        )
+
+        # Preserve the SCD cache hooks.
+        self._after_insert(row, namemapping, newkey)
+
+        # The previous version is no longer current.
+        if oldkey in self.rowcache:
+            del self.rowcache[oldkey]
+
+        return newkey
+
 
 # NB: SnowflakedDimension's methods may have side-effects:
 # row[somedim.key] = someval.
