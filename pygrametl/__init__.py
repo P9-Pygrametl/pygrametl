@@ -42,7 +42,6 @@ The package's modules are:
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-from contextlib import contextmanager
 from datetime import date, datetime
 from sys import modules, version_info
 from threading import Thread
@@ -1298,35 +1297,54 @@ class BackgroundConnectionWrapper(object):
 
 class PipelinedConnectionWrapper(ConnectionWrapper):
     """
-    Wraps a psycopg3 connection to utilize pipeline mode for batching write operations.
-    
-    WARNING: This wrapper relies heavily on deferred network responses. It is highly 
-    sensitive to cache misses. It should only be used when `prefill=True` and `cachesize` 
-    is sufficient to hold much of the working dimension in memory. Frequent cache misses 
-    will trigger forced pipeline synchronizations, severely degrading performance.
+    Wraps a psycopg3 connection to utilize pipeline mode for batching writes.
+
+    - Becomes the default target connection on construction.
+    - cursor() leaves pipeline mode (COPY cannot run inside a pipeline);
+        the next execute()/executemany() re-enters it.
+    - fetchalltuples()/resultnames() only sync after statements that look
+        like they return rows (SELECT/WITH/RETURNING).
+
+    WARNING: ... (existing text)
     """
-    
     def __init__(self, connection, sync_threshold=10000, **kwargs):
         if not hasattr(connection, "pipeline"):
             raise TypeError(
-                "PipelinedConnectionWrapper needs a psycopg 3 connection "
-                "(pipeline mode, libpq >= 14); got %r" % type(connection)
+                f"PipelinedConnectionWrapper needs a psycopg 3 connection "
+                f"(pipeline mode, libpq >= 14); got {type(connection)}"
             )
-        
         super().__init__(connection, **kwargs)
+        self.setasdefault()
 
-        self._raw_conn = connection
         self._sync_threshold = sync_threshold
+        self._raw_conn = connection
         self._pending = 0
+        self._expects_rows = False
         self._is_suspended = False
         self._closed = False
         self._enter_pipeline()
+
+    def __del__(self):
+        # A wrapper freed in a process that never ran close() (the parent, after
+        # the forked server closed the connection) is still in pipeline mode;
+        # exit it quietly so psycopg doesn't log a warning for it.
+        try:
+            if not getattr(self, "_is_suspended", True) and not getattr(self, "_closed", True):
+                self._closed = True
+                self._pipeline_context.__exit__(None, None, None)
+        except Exception:
+            pass
 
     def _enter_pipeline(self):
         self._pipeline_context = self._raw_conn.pipeline()
         self._pipeline = self._pipeline_context.__enter__()
         self._is_suspended = False
         self._pending = 0
+
+    def _ensure_pipeline(self):
+        """Re-enter pipeline mode if a raw cursor was handed out earlier."""
+        if self._is_suspended and not self._closed:
+            self._enter_pipeline()
 
     def _sync(self):
         """Send everything queued and receive the results."""
@@ -1338,11 +1356,14 @@ class PipelinedConnectionWrapper(ConnectionWrapper):
         except Exception as error:
             if hasattr(error, "add_note"):
                 error.add_note(
-                    "Raised while synchronizing a pipeline holding %d queued "
-                    "statement(s); the failing statement is one of them, not "
-                    "necessarily the most recent call." % pending
+                    f"Raised while synchronizing a pipeline holding {pending} queued statement(s)."
                 )
             raise
+
+    @staticmethod
+    def _returns_rows(stmt):
+        s = stmt.lstrip().upper()
+        return s.startswith(("SELECT", "WITH")) or "RETURNING" in s
 
     def suspend_pipeline(self):
         """Leave pipeline mode (after syncing); needed before COPY."""
@@ -1350,33 +1371,25 @@ class PipelinedConnectionWrapper(ConnectionWrapper):
             self._sync()
             self._is_suspended = True
             self._pipeline_context.__exit__(None, None, None)
- 
-    def resume_pipeline(self):
-        """Re-enter pipeline mode after suspend_pipeline()."""
-        if self._is_suspended and not self._closed:
-            self._enter_pipeline()
 
-    @contextmanager
-    def suspended_pipeline(self):
-        """`with connection.suspended_pipeline(): ...COPY...`"""
+    def cursor(self):
+        """Raw cursor. Leaves pipeline mode (COPY can't run in a pipeline);
+        it is re-entered automatically on the next execute."""
         self.suspend_pipeline()
-        try:
-            yield
-        finally:
-            self.resume_pipeline()
+        return super().cursor()
 
     def execute(self, stmt, arguments=None, namemapping=None, translate=True):
+        self._ensure_pipeline()
         super().execute(stmt, arguments, namemapping, translate)
-        if self._is_suspended:
-            return
+        self._expects_rows = self._returns_rows(stmt)
         self._pending += 1
         if self._pending >= self._sync_threshold:
             self._sync()
- 
+
     def executemany(self, stmt, params, translate=True):
+        self._ensure_pipeline()
         super().executemany(stmt, params, translate)
-        if self._is_suspended:
-            return
+        self._expects_rows = self._returns_rows(stmt)
         self._pending += 1
         if self._pending >= self._sync_threshold:
             self._sync()
@@ -1384,44 +1397,46 @@ class PipelinedConnectionWrapper(ConnectionWrapper):
     def fetchone(self, *args, **kwargs):
         self._sync()
         return super().fetchone(*args, **kwargs)
- 
+
     def fetchonetuple(self):
         self._sync()
         return super().fetchonetuple()
- 
+
     def fetchmanytuples(self, cnt):
         self._sync()
         return super().fetchmanytuples(cnt)
- 
+
     def fetchalltuples(self):
-        self._sync()
+        if self._expects_rows:
+            self._sync()
         return super().fetchalltuples()
- 
+
     def rowcount(self):
         self._sync()
         return super().rowcount()
- 
+
     def resultnames(self):
-        self._sync()
+        if self._expects_rows:
+            self._sync()
         return super().resultnames()
- 
+
     def rowfactory(self, *args, **kwargs):
         self._sync()
         return super().rowfactory(*args, **kwargs)
 
     def commit(self):
-        # endload() in super().commit() may call a bulk loader that suspends
-        # and resumes the pipeline, so sync first.
+        # endload() in super().commit() may call a bulk loader that calls
+        # cursor() and so leaves pipeline mode, so sync first.
         self._sync()
         super().commit()
- 
+
     def rollback(self):
         try:
             self._sync()
         except Exception:
             pass  # rolling back anyway, the queued work is discarded
         super().rollback()
- 
+
     def close(self):
         try:
             if not self._is_suspended and not self._closed:
