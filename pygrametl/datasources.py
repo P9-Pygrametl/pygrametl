@@ -27,6 +27,8 @@ provide dicts that map from attribute names to attribute values.
 # OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 # OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
+import asyncio
+import inspect
 import sys
 from csv import DictReader
 from sys import _is_gil_enabled
@@ -52,6 +54,10 @@ except ImportError:
 
 
 __all__ = [
+    "AsyncBackgroundSource",
+    "AsyncMergeJoiningSource",
+    "AsyncSQLSource",
+    "AsyncTransformingSource",
     "BackgroundSource",
     "CSVSource",
     "CrossTabbingSource",
@@ -221,6 +227,127 @@ class SQLSource(object):
                 pass
 
 
+class AsyncSQLSource(object):
+    """A source for asynchronously iterating the result of a SQL query.
+
+    The connection must provide an asynchronous cursor API. In particular,
+    cursor.execute(), cursor.fetchmany()/fetchall(), and normally cursor.close()
+    must return awaitables. This class intentionally does not move synchronous
+    DB-API calls to a thread: using it with a blocking driver would defeat the
+    purpose of asynchronous extraction.
+    """
+
+    def __init__(
+        self,
+        connection,
+        query,
+        names=(),
+        initsql=None,
+        cursorarg=None,
+        parameters=None,
+        fetchsize=500,
+    ):
+        """Arguments:
+
+        - connection: an asynchronous database connection. NOT a
+          ConnectionWrapper!
+        - query: the query that generates the result
+        - names: names of attributes in the result. If not set, the names from
+          the database are used. Default: ()
+        - initsql: SQL executed before the query. Its result is not returned.
+          Default: None.
+        - cursorarg: if not None, this argument is passed to connection.cursor.
+          Default: None.
+        - parameters: if not None, this sequence or mapping of parameters is
+          sent when the query is executed.
+        - fetchsize: rows fetched for each round trip. All rows are fetched at
+          once if fetchsize is 0 or less. Default: 500.
+        """
+        self.connection = connection
+        self.query = query
+        self.names = names
+        self.initsql = initsql
+        self.cursorarg = cursorarg
+        self.parameters = parameters
+        self.fetchsize = fetchsize
+
+    async def _awaitoperation(self, result, operation):
+        if not inspect.isawaitable(result):
+            raise TypeError(
+                "AsyncSQLSource requires an asynchronous database driver; "
+                + "%s did not return an awaitable" % operation
+            )
+        return await result
+
+    async def _newcursor(self):
+        if self.cursorarg is not None:
+            cursor = self.connection.cursor(self.cursorarg)
+        else:
+            cursor = self.connection.cursor()
+        # Some async drivers return the cursor directly (for example psycopg),
+        # while others return an awaitable from connection.cursor().
+        if inspect.isawaitable(cursor):
+            cursor = await cursor
+        return cursor
+
+    async def _closecursor(self, cursor):
+        try:
+            result = cursor.close()
+            if inspect.isawaitable(result):
+                await result
+        except Exception:
+            # Match SQLSource: cursor cleanup must not hide the original error.
+            pass
+
+    async def __aiter__(self):
+        cursor = await self._newcursor()
+        try:
+            if self.initsql:
+                await self._awaitoperation(
+                    cursor.execute(self.initsql), "cursor.execute()"
+                )
+            if self.parameters:
+                await self._awaitoperation(
+                    cursor.execute(self.query, self.parameters),
+                    "cursor.execute()",
+                )
+            else:
+                await self._awaitoperation(
+                    cursor.execute(self.query), "cursor.execute()"
+                )
+            names = None
+            if self.names or cursor.description:
+                names = self.names or [t[0] for t in cursor.description]
+            while True:
+                if self.fetchsize <= 0:
+                    data = await self._awaitoperation(
+                        cursor.fetchall(), "cursor.fetchall()"
+                    )
+                else:
+                    data = await self._awaitoperation(
+                        cursor.fetchmany(self.fetchsize), "cursor.fetchmany()"
+                    )
+
+                if not data:
+                    break
+                if not names:
+                    # As with SQLSource, support cursors whose description is
+                    # only meaningful after data has been fetched.
+                    names = [t[0] for t in cursor.description]
+                if len(names) != len(data[0]):
+                    raise ValueError(
+                        "Incorrect number of names provided. "
+                        + "%d given, %d needed." % (len(names), len(data[0]))
+                    )
+                for row in data:
+                    yield dict(zip(names, row))
+
+                if self.fetchsize <= 0:
+                    break
+        finally:
+            await self._closecursor(cursor)
+
+
 class PandasSource(object):
     """A source for iterating a Pandas DataFrame and cast each row to a dict."""
 
@@ -290,6 +417,80 @@ class ProcessSource(object):
             # else we got a list of rows from the other process
             for row in data:
                 yield row
+
+
+class AsyncBackgroundSource(object):
+    """Prefetch rows from an asynchronous source in a background task.
+
+    Rows are transferred in batches through a bounded asyncio.Queue. This
+    provides back-pressure like ProcessSource without process creation or IPC.
+    It is most useful when both the producer and downstream processing perform
+    awaitable I/O; CPU-bound or fully synchronous downstream work will still
+    block the event loop.
+    """
+
+    _ROWS = 1
+    _STOP = 2
+    _EXCEPTION = 3
+
+    def __init__(self, source, batchsize=500, queuesize=20):
+        """Arguments:
+
+        - source: the asynchronous source to iterate
+        - batchsize: rows placed in the queue as one batch. Must be positive.
+          Default: 500
+        - queuesize: maximum number of batches waiting in the queue. 0 means
+          unlimited. Default: 20
+        """
+        if not hasattr(source, "__aiter__"):
+            raise TypeError("source must be asynchronously iterable")
+        if not isinstance(batchsize, int) or batchsize < 1:
+            raise ValueError("batchsize must be a positive integer")
+        if not isinstance(queuesize, int) or queuesize < 0:
+            raise ValueError("queuesize must be a non-negative integer")
+        self.__source = source
+        self.__batchsize = batchsize
+        self.__queuesize = queuesize
+
+    async def __worker(self, queue):
+        batch = []
+        try:
+            async for row in self.__source:
+                batch.append(row)
+                if len(batch) == self.__batchsize:
+                    await queue.put((self._ROWS, batch))
+                    batch = []
+            if batch:
+                await queue.put((self._ROWS, batch))
+            await queue.put((self._STOP, None))
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            # Preserve ProcessSource's behaviour of yielding a partial batch
+            # before surfacing an exception from the producer.
+            if batch:
+                await queue.put((self._ROWS, batch))
+            await queue.put((self._EXCEPTION, error))
+
+    async def __aiter__(self):
+        queue = asyncio.Queue(maxsize=self.__queuesize)
+        producer = asyncio.create_task(self.__worker(queue))
+        try:
+            while True:
+                kind, value = await queue.get()
+                if kind == self._STOP:
+                    break
+                if kind == self._EXCEPTION:
+                    raise value
+                for row in value:
+                    yield row
+        finally:
+            if not producer.done():
+                producer.cancel()
+            try:
+                await producer
+            except asyncio.CancelledError:
+                pass
 
 
 BackgroundSource = ProcessSource  # for compatability
@@ -405,6 +606,75 @@ class MergeJoiningSource(object):
                 return res
 
 
+class AsyncMergeJoiningSource(object):
+    """A source for asynchronously merge-joining two sorted data sources."""
+
+    def __init__(self, src1, key1, src2, key2):
+        """Arguments:
+
+        - src1: an asynchronous data source
+        - key1: the attribute to use from src1
+        - src2: an asynchronous data source
+        - key2: the attribute to use from src2
+        """
+        if not hasattr(src1, "__aiter__") or not hasattr(src2, "__aiter__"):
+            raise TypeError("sources must be asynchronously iterable")
+        self.__src1 = src1
+        self.__key1 = key1
+        self.__src2 = src2
+        self.__key2 = key2
+        self.__next = None
+
+    async def __aiter__(self):
+        iter1 = self.__src1.__aiter__()
+        iter2 = self.__src2.__aiter__()
+
+        try:
+            row1 = await iter1.__anext__()
+            keyval1 = row1[self.__key1]
+            rows2 = await self.__getnextrows(iter2)
+            keyval2 = rows2[0][self.__key2]
+
+            while True:
+                if keyval1 == keyval2:
+                    for part in rows2:
+                        resrow = row1.copy()
+                        resrow.update(part)
+                        yield resrow
+                    row1 = await iter1.__anext__()
+                    keyval1 = row1[self.__key1]
+                elif keyval1 < keyval2:
+                    row1 = await iter1.__anext__()
+                    keyval1 = row1[self.__key1]
+                else:
+                    rows2 = await self.__getnextrows(iter2)
+                    keyval2 = rows2[0][self.__key2]
+        except StopAsyncIteration:
+            return
+
+    async def __getnextrows(self, iterval):
+        res = []
+        keyval = None
+        if self.__next is not None:
+            res.append(self.__next)
+            keyval = self.__next[self.__key2]
+            self.__next = None
+        while True:
+            try:
+                row = await iterval.__anext__()
+            except StopAsyncIteration:
+                if res:
+                    return res
+                raise
+            if keyval is None:
+                keyval = row[self.__key2]
+            if row[self.__key2] == keyval:
+                res.append(row)
+            else:
+                self.__next = row
+                return res
+
+
 class MappingSource(object):
     """A class for iterating a source and applying a function to each column."""
 
@@ -449,6 +719,30 @@ class TransformingSource(object):
         for row in self.__source:
             for func in self.__transformations:
                 func(row)
+            yield row
+
+
+class AsyncTransformingSource(object):
+    """An asynchronous source that applies functions to each input row."""
+
+    def __init__(self, source, *transformations):
+        """Arguments:
+
+        - source: an asynchronous data source
+        - *transformations: transformations of the form func(row). Both normal
+          callables and async callables are supported and applied in order.
+        """
+        if not hasattr(source, "__aiter__"):
+            raise TypeError("source must be asynchronously iterable")
+        self.__source = source
+        self.__transformations = transformations
+
+    async def __aiter__(self):
+        async for row in self.__source:
+            for func in self.__transformations:
+                result = func(row)
+                if inspect.isawaitable(result):
+                    await result
             yield row
 
 
