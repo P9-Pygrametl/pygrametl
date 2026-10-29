@@ -1314,8 +1314,8 @@ class PipelinedConnectionWrapper(ConnectionWrapper):
     def __init__(self, connection, sync_threshold=10000, **kwargs):
         if not hasattr(connection, "pipeline"):
             raise TypeError(
-                f"PipelinedConnectionWrapper needs a psycopg 3 connection "
-                f"(pipeline mode, libpq >= 14); got {type(connection)}"
+                "PipelinedConnectionWrapper needs a psycopg 3 connection "
+                "(pipeline mode, libpq >= 14); got {}".format(type(connection))
             )
 
         super().__init__(connection, **kwargs)
@@ -1364,7 +1364,9 @@ class PipelinedConnectionWrapper(ConnectionWrapper):
         except Exception as error:
             if hasattr(error, "add_note"):
                 error.add_note(
-                    f"Raised while synchronizing a pipeline holding {pending} queued statement(s)."
+                    "Raised while synchronizing a pipeline holding {} queued statement(s).".format(
+                        pending
+                    )
                 )
             raise
 
