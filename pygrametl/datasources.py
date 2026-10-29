@@ -31,7 +31,6 @@ import asyncio
 import inspect
 import sys
 from csv import DictReader
-from sys import _is_gil_enabled
 
 import pygrametl
 from pygrametl import ConnectionWrapper, tables
@@ -41,9 +40,11 @@ if sys.platform.startswith("java"):
     from pygrametl.jythonmultiprocessing import Process, Queue
 else:
     import sqlite3  # Only used by SQLTransformingSource
+    from sys import _is_gil_enabled
+
     if not _is_gil_enabled():
-        from threading import Thread as Process
         from queue import Queue  # Only used by DynamicForEachSource
+        from threading import Thread as Process
     else:
         from multiprocessing import Process, Queue
 

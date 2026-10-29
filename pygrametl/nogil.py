@@ -1,10 +1,10 @@
-from threading import RLock
 from queue import Queue
+from threading import RLock
 
 __all__ = ["Value"]
 
-class Value:
 
+class Value:
     def __init__(self, typecode: str, value=0):
         self.typecode = typecode
         self.value = value
@@ -23,7 +23,7 @@ class Value:
         with self.lock:
             self._value = new_value
 
+
 class JoinableQueue(Queue):
     def close(self):
         pass
-    

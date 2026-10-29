@@ -426,7 +426,7 @@ def rowfactory(source, names, close=True):
                         return
                     else:
                         yield dict(zip(names, tmp))
-                except (StopIteration, IndexError):
+                except StopIteration, IndexError:
                     return
         else:
             for row in source.fetchall():
@@ -1299,20 +1299,20 @@ class BackgroundConnectionWrapper(object):
 class PipelinedConnectionWrapper(ConnectionWrapper):
     """
     Wraps a psycopg3 connection to utilize pipeline mode for batching write operations.
-    
-    WARNING: This wrapper relies heavily on deferred network responses. It is highly 
-    sensitive to cache misses. It should only be used when `prefill=True` and `cachesize` 
-    is sufficient to hold much of the working dimension in memory. Frequent cache misses 
+
+    WARNING: This wrapper relies heavily on deferred network responses. It is highly
+    sensitive to cache misses. It should only be used when `prefill=True` and `cachesize`
+    is sufficient to hold much of the working dimension in memory. Frequent cache misses
     will trigger forced pipeline synchronizations, severely degrading performance.
     """
-    
+
     def __init__(self, connection, sync_threshold=10000, **kwargs):
         if not hasattr(connection, "pipeline"):
             raise TypeError(
                 "PipelinedConnectionWrapper needs a psycopg 3 connection "
                 "(pipeline mode, libpq >= 14); got %r" % type(connection)
             )
-        
+
         super().__init__(connection, **kwargs)
 
         self._raw_conn = connection
@@ -1350,7 +1350,7 @@ class PipelinedConnectionWrapper(ConnectionWrapper):
             self._sync()
             self._is_suspended = True
             self._pipeline_context.__exit__(None, None, None)
- 
+
     def resume_pipeline(self):
         """Re-enter pipeline mode after suspend_pipeline()."""
         if self._is_suspended and not self._closed:
@@ -1372,7 +1372,7 @@ class PipelinedConnectionWrapper(ConnectionWrapper):
         self._pending += 1
         if self._pending >= self._sync_threshold:
             self._sync()
- 
+
     def executemany(self, stmt, params, translate=True):
         super().executemany(stmt, params, translate)
         if self._is_suspended:
@@ -1384,27 +1384,27 @@ class PipelinedConnectionWrapper(ConnectionWrapper):
     def fetchone(self, *args, **kwargs):
         self._sync()
         return super().fetchone(*args, **kwargs)
- 
+
     def fetchonetuple(self):
         self._sync()
         return super().fetchonetuple()
- 
+
     def fetchmanytuples(self, cnt):
         self._sync()
         return super().fetchmanytuples(cnt)
- 
+
     def fetchalltuples(self):
         self._sync()
         return super().fetchalltuples()
- 
+
     def rowcount(self):
         self._sync()
         return super().rowcount()
- 
+
     def resultnames(self):
         self._sync()
         return super().resultnames()
- 
+
     def rowfactory(self, *args, **kwargs):
         self._sync()
         return super().rowfactory(*args, **kwargs)
@@ -1414,14 +1414,14 @@ class PipelinedConnectionWrapper(ConnectionWrapper):
         # and resumes the pipeline, so sync first.
         self._sync()
         super().commit()
- 
+
     def rollback(self):
         try:
             self._sync()
         except Exception:
             pass  # rolling back anyway, the queued work is discarded
         super().rollback()
- 
+
     def close(self):
         try:
             if not self._is_suspended and not self._closed:
