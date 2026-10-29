@@ -425,7 +425,7 @@ def rowfactory(source, names, close=True):
                         return
                     else:
                         yield dict(zip(names, tmp))
-                except (StopIteration, IndexError):
+                except StopIteration, IndexError:
                     return
         else:
             for row in source.fetchall():
@@ -1305,7 +1305,10 @@ class PipelinedConnectionWrapper(ConnectionWrapper):
     - fetchalltuples()/resultnames() only sync after statements that look
         like they return rows (SELECT/WITH/RETURNING).
 
-    WARNING: ... (existing text)
+    WARNING: This wrapper relies heavily on deferred network responses. It is highly
+    sensitive to cache misses. It should only be used when `prefill=True` and `cachesize`
+    is sufficient to hold much of the working dimension in memory. Frequent cache misses
+    will trigger forced pipeline synchronizations, severely degrading performance.
     """
     def __init__(self, connection, sync_threshold=10000, **kwargs):
         if not hasattr(connection, "pipeline"):
@@ -1313,6 +1316,7 @@ class PipelinedConnectionWrapper(ConnectionWrapper):
                 f"PipelinedConnectionWrapper needs a psycopg 3 connection "
                 f"(pipeline mode, libpq >= 14); got {type(connection)}"
             )
+
         super().__init__(connection, **kwargs)
         self.setasdefault()
 
