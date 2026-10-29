@@ -930,6 +930,7 @@ class SharedConnectionWrapperClient(object):
     def commit(self):
         """Commit the transaction."""
         pygrametl.endload()
+        self.__join()
         self.__enqueue("commit")
         self.__join()
 
