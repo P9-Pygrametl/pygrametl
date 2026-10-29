@@ -425,7 +425,7 @@ def rowfactory(source, names, close=True):
                         return
                     else:
                         yield dict(zip(names, tmp))
-                except StopIteration, IndexError:
+                except (StopIteration, IndexError):
                     return
         else:
             for row in source.fetchall():
