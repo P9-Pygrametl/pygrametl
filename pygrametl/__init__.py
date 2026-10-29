@@ -1310,6 +1310,7 @@ class PipelinedConnectionWrapper(ConnectionWrapper):
     is sufficient to hold much of the working dimension in memory. Frequent cache misses
     will trigger forced pipeline synchronizations, severely degrading performance.
     """
+
     def __init__(self, connection, sync_threshold=10000, **kwargs):
         if not hasattr(connection, "pipeline"):
             raise TypeError(
@@ -1333,7 +1334,10 @@ class PipelinedConnectionWrapper(ConnectionWrapper):
         # the forked server closed the connection) is still in pipeline mode;
         # exit it quietly so psycopg doesn't log a warning for it.
         try:
-            if not getattr(self, "_is_suspended", True) and not getattr(self, "_closed", True):
+            is_suspended = getattr(self, "_is_suspended", True)
+            is_closed = getattr(self, "_closed", True)
+
+            if not (is_suspended or is_closed):
                 self._closed = True
                 self._pipeline_context.__exit__(None, None, None)
         except Exception:
