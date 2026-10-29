@@ -38,9 +38,8 @@ if sys.platform.startswith("java"):
     from pygrametl.jythonmultiprocessing import Process, Queue
 else:
     import sqlite3  # Only used by SQLTransformingSource
-    from sys import _is_gil_enabled
 
-    if not _is_gil_enabled():
+    if not getattr(sys, "_is_gil_enabled", lambda: True)():
         from queue import Queue  # Only used by DynamicForEachSource
         from threading import Thread as Process
     else:

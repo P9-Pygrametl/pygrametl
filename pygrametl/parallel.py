@@ -42,7 +42,7 @@ if sys.platform.startswith("java"):
     # Jython specific code in jythonmultiprocessing
     from pygrametl.jythonmultiprocessing import JoinableQueue, Process, Queue, Value
 else:
-    from sys import _is_gil_enabled
+    _is_gil_enabled = getattr(sys, "_is_gil_enabled", lambda: True)
 
     if not _is_gil_enabled():
         from queue import Queue
