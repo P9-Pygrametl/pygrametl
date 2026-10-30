@@ -854,3 +854,12 @@ class UnpivotingSource(object):
                 res[self.__nameatt] = att
                 res[self.__valueatt] = value
                 yield res
+
+
+if not sys.platform.startswith("java") and sys.version_info >= (3, 10):
+    from pygrametl.asyncdatasources import (  # noqa: F401
+        AsyncMergeJoiningSource,
+        AsyncSQLSource,
+    )
+
+    __all__.extend(["AsyncMergeJoiningSource", "AsyncSQLSource"])
