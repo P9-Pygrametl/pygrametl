@@ -31,8 +31,11 @@ jobs:
     - name: Python Unittest
       run: python -m unittest --verbose
 
-    - name: Vermin Violations
-      run: vermin --quiet  --target=3.4 --violations .
+    - name: Vermin Legacy Compatibility
+      run: vermin --quiet --target=3.4 --violations --exclude-regex '(^|/)(asyncdatasources|test_asyncdatasources)\.py$' .
+
+    - name: Vermin Async Compatibility
+      run: vermin --quiet --target=3.10 --violations pygrametl/asyncdatasources.py tests/test_asyncdatasources.py
 
     # Docs.
     - name: Sphinx Build
