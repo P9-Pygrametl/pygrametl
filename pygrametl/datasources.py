@@ -54,8 +54,6 @@ except ImportError:
 
 
 __all__ = [
-    "AsyncMergeJoiningSource",
-    "AsyncSQLSource",
     "BackgroundSource",
     "CSVSource",
     "CrossTabbingSource",
@@ -231,7 +229,7 @@ class AsyncSQLSource(object):
     Requires an asynchronous database connection, such as
     psycopg.AsyncConnection.
 
-    Optionally prefetches batches using a background asyncio task.
+    Prefetches batches using a background asyncio task.
     Rows are yielded as dictionaries, like those from SQLSource.
     """
 
@@ -244,7 +242,7 @@ class AsyncSQLSource(object):
         cursorarg=None,
         parameters=None,
         fetchsize=500,
-        prefetch=0,
+        prefetch=2,
     ):
         """Arguments:
 
@@ -257,10 +255,14 @@ class AsyncSQLSource(object):
         - fetchsize: Number of rows to fetch per batch.
           If <= 0, all rows are fetched at once.
         - prefetch: Maximum number of completed batches buffered
-          ahead of the consumer. 0 disables background prefetching.
+          ahead of the consumer. Must be a positive integer.
         """
-        if not isinstance(prefetch, int) or prefetch < 0:
-            raise ValueError("prefetch must be a non-negative integer")
+        if (
+            not isinstance(prefetch, int)
+            or isinstance(prefetch, bool)
+            or prefetch < 1
+        ):
+            raise ValueError("prefetch must be a positive integer")
 
         self.connection = connection
         self.query = query
@@ -280,17 +282,14 @@ class AsyncSQLSource(object):
         producer_task = None
 
         try:
-            # Execute optional initialisation SQL.
             if self.initsql:
                 await cursor.execute(self.initsql)
 
-            # Execute the main query.
             if self.parameters is not None:
                 await cursor.execute(self.query, self.parameters)
             else:
                 await cursor.execute(self.query)
 
-            # Column metadata may not yet be available.
             names = self.names or None
 
             if not names and cursor.description:
@@ -318,28 +317,14 @@ class AsyncSQLSource(object):
                 for row in data:
                     yield dict(zip(names, row))
 
-            # No prefetching: preserve the original behaviour.
-            # fetchall() is also handled without prefetching.
-            if self.prefetch == 0 or self.fetchsize <= 0:
-                while True:
-                    if self.fetchsize <= 0:
-                        data = await cursor.fetchall()
-                    else:
-                        data = await cursor.fetchmany(
-                            self.fetchsize
-                        )
+            if self.fetchsize <= 0:
+                data = await cursor.fetchall()
 
-                    if not data:
-                        break
-
+                if data:
                     for row in convert_batch(data):
                         yield row
 
-                    if self.fetchsize <= 0:
-                        break
-
             else:
-                # Prefetch complete batches, not individual rows.
                 queue = asyncio.Queue(maxsize=self.prefetch)
 
                 async def producer():
@@ -355,18 +340,12 @@ class AsyncSQLSource(object):
                             await queue.put(("data", data))
 
                     except Exception as error:
-                        # Propagate database errors to the consumer.
                         await queue.put(("error", error))
-
                     else:
-                        # Signal successful completion.
                         await queue.put(("done", None))
 
-                producer_task = asyncio.create_task(
-                    producer()
-                )
+                producer_task = asyncio.create_task(producer())
 
-                # Consume prefetched batches.
                 while True:
                     message, value = await queue.get()
 
@@ -380,7 +359,6 @@ class AsyncSQLSource(object):
                         yield row
 
         finally:
-            # Stop background fetching before closing the cursor.
             if producer_task is not None:
                 if not producer_task.done():
                     producer_task.cancel()
@@ -1151,3 +1129,18 @@ class UnpivotingSource(object):
                 res[self.__nameatt] = att
                 res[self.__valueatt] = value
                 yield res
+
+
+if (
+    not sys.platform.startswith("java")
+    and sys.version_info >= (3, 10)
+):
+    from pygrametl.asyncdatasources import (
+        AsyncMergeJoiningSource,
+        AsyncSQLSource,
+    )
+
+    __all__.extend([
+        "AsyncMergeJoiningSource",
+        "AsyncSQLSource",
+    ])
