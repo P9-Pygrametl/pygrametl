@@ -30,7 +30,7 @@ Note that this module in many cases will give better results with Jython
 import copy
 import os
 import sys
-from sys import version_info, _is_gil_enabled
+from sys import version_info
 
 import pygrametl
 
@@ -40,20 +40,23 @@ except ImportError:
     from queue import Empty  # Python 3
 if sys.platform.startswith("java"):
     # Jython specific code in jythonmultiprocessing
-    from pygrametl.jythonmultiprocessing import Process, Queue, JoinableQueue, Value
+    from pygrametl.jythonmultiprocessing import JoinableQueue, Process, Queue, Value
 else:
+    _is_gil_enabled = getattr(sys, "_is_gil_enabled", lambda: True)
+
     if not _is_gil_enabled():
-        from pygrametl.nogil import Value, JoinableQueue
-        from threading import Thread as Process
         from queue import Queue
+        from threading import Thread as Process
+
+        from pygrametl.nogil import JoinableQueue, Value
     else:
         import multiprocessing
-        from multiprocessing import Process, Queue, JoinableQueue, Value
+        from multiprocessing import JoinableQueue, Process, Queue, Value
 
-    # This module assumes processes inherit state through fork. Thus, it
-    # requires that the platform supports the fork start method. The start
-    # method is not set to fork when Sphinx is building the documentation as it
-    # prevents Windows from doing so
+        # This module assumes processes inherit state through fork. Thus, it
+        # requires that the platform supports the fork start method. The start
+        # method is not set to fork when Sphinx is building the documentation as it
+        # prevents Windows from doing so
         if (
             multiprocessing.get_start_method(allow_none=True) != "fork"
             and os.environ.get("SPHINX_BUILD") != "1"
@@ -263,9 +266,7 @@ def splitpoint(*arg, **kwargs):
         # Else set up processes
         input = JoinableQueue(queuesize)
         for n in range(instances):
-            p = Process(
-                target=_splitprocess, args=(func, input, output, n)
-            )
+            p = Process(target=_splitprocess, args=(func, input, output, n))
             p.name = "Process-%d for %s" % (n, func.__name__)
             p.daemon = True
             p.start()
@@ -929,6 +930,7 @@ class SharedConnectionWrapperClient(object):
     def commit(self):
         """Commit the transaction."""
         pygrametl.endload()
+        self.__join()
         self.__enqueue("commit")
         self.__join()
 

@@ -29,7 +29,6 @@ provide dicts that map from attribute names to attribute values.
 
 import sys
 from csv import DictReader
-from sys import _is_gil_enabled
 
 import pygrametl
 from pygrametl import ConnectionWrapper, tables
@@ -40,7 +39,7 @@ if sys.platform.startswith("java"):
 else:
     import sqlite3  # Only used by SQLTransformingSource
 
-    if not _is_gil_enabled():
+    if not getattr(sys, "_is_gil_enabled", lambda: True)():
         from queue import Queue  # Only used by DynamicForEachSource
         from threading import Thread as Process
     else:
