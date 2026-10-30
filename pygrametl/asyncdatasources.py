@@ -41,11 +41,7 @@ class AsyncSQLSource(object):
         - prefetch: Maximum number of completed batches buffered
           ahead of the consumer. Must be a positive integer.
         """
-        if (
-            not isinstance(prefetch, int)
-            or isinstance(prefetch, bool)
-            or prefetch < 1
-        ):
+        if not isinstance(prefetch, int) or isinstance(prefetch, bool) or prefetch < 1:
             raise ValueError("prefetch must be a positive integer")
 
         self.connection = connection
@@ -77,25 +73,18 @@ class AsyncSQLSource(object):
             names = self.names or None
 
             if not names and cursor.description:
-                names = [
-                    column[0]
-                    for column in cursor.description
-                ]
+                names = [column[0] for column in cursor.description]
 
             def convert_batch(data):
                 nonlocal names
 
                 if not names:
-                    names = [
-                        column[0]
-                        for column in cursor.description
-                    ]
+                    names = [column[0] for column in cursor.description]
 
                 if len(names) != len(data[0]):
                     raise ValueError(
                         "Incorrect number of names provided. "
-                        + "%d given, %d needed."
-                        % (len(names), len(data[0]))
+                        + "%d given, %d needed." % (len(names), len(data[0]))
                     )
 
                 for row in data:
@@ -114,9 +103,7 @@ class AsyncSQLSource(object):
                 async def producer():
                     try:
                         while True:
-                            data = await cursor.fetchmany(
-                                self.fetchsize
-                            )
+                            data = await cursor.fetchmany(self.fetchsize)
 
                             if not data:
                                 break
@@ -194,9 +181,7 @@ class AsyncMergeJoiningSource(object):
             # to the next group in source 2.
             pending = None
 
-            rows2, pending = await self.__getnextrows(
-                iter2, pending
-            )
+            rows2, pending = await self.__getnextrows(iter2, pending)
 
             if not rows2:
                 return
@@ -228,9 +213,7 @@ class AsyncMergeJoiningSource(object):
 
                 else:
                     # Advance source 2 to its next group.
-                    rows2, pending = await self.__getnextrows(
-                        iter2, pending
-                    )
+                    rows2, pending = await self.__getnextrows(iter2, pending)
 
                     if not rows2:
                         break

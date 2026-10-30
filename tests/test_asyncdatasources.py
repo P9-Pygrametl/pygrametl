@@ -66,11 +66,16 @@ class AsyncSQLSourceTest(unittest.IsolatedAsyncioTestCase):
         cursor = FakeCursor([(1, "a"), (2, "b"), (3, "c"), (4, "d"), (5, "e")])
         source = AsyncSQLSource(FakeConnection(cursor), "SELECT ...", fetchsize=2)
         result = [row async for row in source]
-        self.assertEqual(result, [
-            {"id": 1, "value": "a"}, {"id": 2, "value": "b"},
-            {"id": 3, "value": "c"}, {"id": 4, "value": "d"},
-            {"id": 5, "value": "e"},
-        ])
+        self.assertEqual(
+            result,
+            [
+                {"id": 1, "value": "a"},
+                {"id": 2, "value": "b"},
+                {"id": 3, "value": "c"},
+                {"id": 4, "value": "d"},
+                {"id": 5, "value": "e"},
+            ],
+        )
         self.assertEqual(cursor.fetch_calls, 4)  # Three batches + EOF.
         self.assertTrue(cursor.closed)
 
@@ -104,7 +109,9 @@ class AsyncSQLSourceTest(unittest.IsolatedAsyncioTestCase):
         for size in (0, -1):
             with self.subTest(fetchsize=size):
                 cursor = FakeCursor([(1, "a"), (2, "b")])
-                source = AsyncSQLSource(FakeConnection(cursor), "SELECT ...", fetchsize=size)
+                source = AsyncSQLSource(
+                    FakeConnection(cursor), "SELECT ...", fetchsize=size
+                )
                 self.assertEqual(len([r async for r in source]), 2)
                 self.assertEqual(cursor.fetchall_calls, 1)
                 self.assertEqual(cursor.fetch_calls, 0)
@@ -120,20 +127,29 @@ class AsyncSQLSourceTest(unittest.IsolatedAsyncioTestCase):
         cursor = FakeCursor([(10, "x")], columns=("db_id", "db_val"))
         conn = FakeConnection(cursor)
         source = AsyncSQLSource(
-            conn, "SELECT ... WHERE id = %s", names=("key", "label"),
-            initsql="SET search_path TO public", cursorarg="my_cursor",
-            parameters=(10,), fetchsize=1,
+            conn,
+            "SELECT ... WHERE id = %s",
+            names=("key", "label"),
+            initsql="SET search_path TO public",
+            cursorarg="my_cursor",
+            parameters=(10,),
+            fetchsize=1,
         )
         self.assertEqual([r async for r in source], [{"key": 10, "label": "x"}])
         self.assertEqual(conn.cursor_arguments, [("my_cursor",)])
-        self.assertEqual(cursor.executions, [
-            ("SET search_path TO public", None),
-            ("SELECT ... WHERE id = %s", (10,)),
-        ])
+        self.assertEqual(
+            cursor.executions,
+            [
+                ("SET search_path TO public", None),
+                ("SELECT ... WHERE id = %s", (10,)),
+            ],
+        )
 
     async def test_wrong_column_count_raises(self):
         cursor = FakeCursor([(1, "a")])
-        source = AsyncSQLSource(FakeConnection(cursor), "SELECT ...", names=("only_one",))
+        source = AsyncSQLSource(
+            FakeConnection(cursor), "SELECT ...", names=("only_one",)
+        )
         with self.assertRaisesRegex(ValueError, "Incorrect number of names"):
             [r async for r in source]
         self.assertTrue(cursor.closed)
@@ -147,16 +163,21 @@ class AsyncSQLSourceTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_early_close_releases_cursor(self):
         cursor = FakeCursor([(i, str(i)) for i in range(20)])
-        stream = aiter(AsyncSQLSource(FakeConnection(cursor), "SELECT ...", fetchsize=2))
+        stream = aiter(
+            AsyncSQLSource(FakeConnection(cursor), "SELECT ...", fetchsize=2)
+        )
         self.assertEqual((await anext(stream))["id"], 0)
         await asyncio.wait_for(stream.aclose(), timeout=2)
         self.assertTrue(cursor.closed)
 
     def test_prefetch_must_be_positive_integer(self):
         for value in (0, -1, 2.5, "2", None, True):
-            with self.subTest(prefetch=value):
-                with self.assertRaises(ValueError):
-                    AsyncSQLSource(FakeConnection(FakeCursor([])), "SELECT ...", prefetch=value)
+            with self.subTest(prefetch=value), self.assertRaises(ValueError):
+                AsyncSQLSource(
+                    FakeConnection(FakeCursor([])),
+                    "SELECT ...",
+                    prefetch=value,
+                )
 
 
 class AsyncMergeJoiningSourceTest(unittest.IsolatedAsyncioTestCase):
@@ -171,22 +192,32 @@ class AsyncMergeJoiningSourceTest(unittest.IsolatedAsyncioTestCase):
             [{"left_id": 1, "left": "A"}, {"left_id": 2, "left": "B"}],
             [{"right_id": 1, "right": "X"}, {"right_id": 2, "right": "Y"}],
         )
-        self.assertEqual([(r["left"], r["right"]) for r in actual], [("A", "X"), ("B", "Y")])
+        self.assertEqual(
+            [(r["left"], r["right"]) for r in actual], [("A", "X"), ("B", "Y")]
+        )
 
     async def test_many_to_many_duplicate_keys(self):
         actual = await self.join(
             [{"left_id": 1, "left": "A"}, {"left_id": 1, "left": "B"}],
             [{"right_id": 1, "right": "X"}, {"right_id": 1, "right": "Y"}],
         )
-        self.assertEqual([(r["left"], r["right"]) for r in actual],
-                         [("A", "X"), ("A", "Y"), ("B", "X"), ("B", "Y")])
+        self.assertEqual(
+            [(r["left"], r["right"]) for r in actual],
+            [("A", "X"), ("A", "Y"), ("B", "X"), ("B", "Y")],
+        )
 
     async def test_unmatched_keys_are_skipped(self):
         actual = await self.join(
-            [{"left_id": 1, "left": "A"}, {"left_id": 3, "left": "C"},
-             {"left_id": 5, "left": "E"}],
-            [{"right_id": 2, "right": "B"}, {"right_id": 3, "right": "D"},
-             {"right_id": 4, "right": "F"}],
+            [
+                {"left_id": 1, "left": "A"},
+                {"left_id": 3, "left": "C"},
+                {"left_id": 5, "left": "E"},
+            ],
+            [
+                {"right_id": 2, "right": "B"},
+                {"right_id": 3, "right": "D"},
+                {"right_id": 4, "right": "F"},
+            ],
         )
         self.assertEqual([(r["left"], r["right"]) for r in actual], [("C", "D")])
 
@@ -197,8 +228,10 @@ class AsyncMergeJoiningSourceTest(unittest.IsolatedAsyncioTestCase):
     async def test_join_early_close_closes_inputs(self):
         closed = []
         source = AsyncMergeJoiningSource(
-            rows_as_source([{"left_id": 1}], closed), "left_id",
-            rows_as_source([{"right_id": 1}], closed), "right_id",
+            rows_as_source([{"left_id": 1}], closed),
+            "left_id",
+            rows_as_source([{"right_id": 1}], closed),
+            "right_id",
         )
         iterator = aiter(source)
         await anext(iterator)
