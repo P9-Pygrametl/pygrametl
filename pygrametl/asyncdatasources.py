@@ -176,11 +176,7 @@ class AsyncMergeJoiningSource(object):
                 return
 
             keyval1 = row1[self.__key1]
-
-            # The pending row is the first row belonging
-            # to the next group in source 2.
             pending = None
-
             rows2, pending = await self.__getnextrows(iter2, pending)
 
             if not rows2:
@@ -190,7 +186,6 @@ class AsyncMergeJoiningSource(object):
 
             while True:
                 if keyval1 == keyval2:
-                    # Produce joined rows.
                     for part in rows2:
                         resrow = row1.copy()
                         resrow.update(part)
@@ -212,7 +207,6 @@ class AsyncMergeJoiningSource(object):
                     keyval1 = row1[self.__key1]
 
                 else:
-                    # Advance source 2 to its next group.
                     rows2, pending = await self.__getnextrows(iter2, pending)
 
                     if not rows2:
@@ -221,7 +215,6 @@ class AsyncMergeJoiningSource(object):
                     keyval2 = rows2[0][self.__key2]
 
         finally:
-            # Close underlying asynchronous generators.
             for iterator in (iter1, iter2):
                 close = getattr(iterator, "aclose", None)
 
